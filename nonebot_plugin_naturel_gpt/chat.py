@@ -42,11 +42,29 @@ class Chat:
                 preset_key = list(self.chat_preset_dicts.keys())[0]
         self.change_presettings(preset_key)
 
-    async def update_chat_history_row(self, sender:str, msg: str, require_summary:bool = False, record_time=False, images: Optional[List[str]] = None) -> None:
-        """更新当前会话的全局对话历史行"""
+    async def update_chat_history_row(self, sender:str, msg: str, require_summary:bool = False, record_time=False, images: Optional[List[str]] = None, is_bot_reply: bool = False) -> None:
+        """更新当前会话的全局对话历史行
+        
+        Args:
+            is_bot_reply: 是否为Bot的回复，用于区分更新哪个窗口
+                - True: 同时更新精简窗口(bot_interaction_history)和全量窗口
+                - False: 只更新全量窗口(group_context_history)
+        """
         tg = TextGenerator.instance
         messageunit = tg.generate_msg_template(sender=sender, msg=msg, time_str=f"[{time.strftime('%H:%M:%S %p', time.localtime())}] ")
+        
+        # 同时更新旧的历史记录以保持兼容
         self._chat_data.chat_history.append(messageunit)
+        
+        # 更新双窗口历史
+        if is_bot_reply:
+            # Bot的回复：同时更新精简窗口和全量窗口
+            self._chat_data.bot_interaction_history.append(messageunit)
+            self._chat_data.group_context_history.append(messageunit)
+        else:
+            # 用户消息：只更新全量窗口（群内上下文）
+            self._chat_data.group_context_history.append(messageunit)
+        
         if images and config.MULTIMODAL_ENABLE:
             self._chat_data.chat_image_history.append({
                 "history_index": len(self._chat_data.chat_history) - 1,
@@ -60,28 +78,36 @@ class Chat:
                 self._chat_data.chat_image_history = self._chat_data.chat_image_history[-max_image_messages:]
             else:
                 self._chat_data.chat_image_history = []
-        if config.DEBUG_LEVEL > 0: logger.info(f"[会话: {self.chat_key}]添加对话历史行: {messageunit}  |  当前对话历史行数: {len(self._chat_data.chat_history)}")
+        
+        if config.DEBUG_LEVEL > 0: logger.info(f"[会话: {self.chat_key}]添加对话历史行: {messageunit}  |  "
+                    f"精简窗口: {len(self._chat_data.bot_interaction_history)}条  "
+                    f"全量窗口: {len(self._chat_data.group_context_history)}条")
+        
         if record_time:
             self._last_msg_time = time.time()   # 更新上次对话时间
-        while len(self._chat_data.chat_history) > config.CHAT_MEMORY_MAX_LENGTH * 2:    # 保证对话历史不超过最大长度的两倍
+        
+        # 维护窗口大小
+        while len(self._chat_data.chat_history) > config.CHAT_MEMORY_MAX_LENGTH * 2:
             self._chat_data.chat_history.pop(0)
+        while len(self._chat_data.bot_interaction_history) > config.CHAT_MEMORY_SHORT_LENGTH:
+            self._chat_data.bot_interaction_history.pop(0)
+        while len(self._chat_data.group_context_history) > config.CHAT_MEMORY_MAX_LENGTH:
+            self._chat_data.group_context_history.pop(0)
 
-        if len(self._chat_data.chat_history) > config.CHAT_MEMORY_MAX_LENGTH and require_summary and config.CHAT_ENABLE_SUMMARY_CHAT: # 只有在开启总结功能并且在bot回复后才进行总结 避免不必要的token消耗
+        if len(self._chat_data.chat_history) > config.CHAT_MEMORY_MAX_LENGTH and require_summary and config.CHAT_ENABLE_SUMMARY_CHAT:
             prev_summarized = f"上次对话摘要：{self._chat_data.chat_summarized}\n\n"
             history_str = '\n'.join(self._chat_data.chat_history)
-            prompt = (  # 以机器人的视角总结对话历史
+            prompt = (
                 f"{prev_summarized}[对话]\n"
                 f"{history_str}"
                 f"\n\n{self.chat_preset.bot_self_introl}\n请以'{self.chat_preset.preset_key}'的视角用一段话总结对话，在200字内简要记录尽可能多的对话重要信息："
             )
-            # if config.DEBUG_LEVEL > 0: logger.info(f"生成对话历史摘要prompt: {prompt}")
-            res, success = await tg.get_response(prompt, type='summarize')  # 生成新的对话历史摘要
+            res, success = await tg.get_response(prompt, type='summarize')
             if success:
                 self._chat_data.chat_summarized = res.strip()
             else:
                 logger.error(f"生成对话历史摘要失败: {res}")
                 return
-            # logger.info(f"生成对话历史摘要: {self.chat_presets['chat_summarized']}")
             if config.DEBUG_LEVEL > 0: logger.info(f"摘要生成消耗token数: {tg.cal_token_count(prompt + self._chat_data.chat_summarized)}")
             self._chat_data.chat_history = self._chat_data.chat_history[-config.CHAT_MEMORY_SHORT_LENGTH:]
 
@@ -184,16 +210,32 @@ class Chat:
                 f"{memory_text}\n"
             ) if memory_text else ''
 
-        # 对话历史
-        offset = 0
-        chat_history:str = '\n\n\n'.join(self._chat_data.chat_history[-(config.CHAT_MEMORY_SHORT_LENGTH + offset):])  # 从对话历史中截取短期对话
+        # 对话历史 - 双窗口设计
+        # 1. 精简窗口：与Bot的成功互动历史（用于角色理解和长期记忆）
+        # 2. 全量窗口：群内当前上下文（用于了解当前讨论话题）
         tg = TextGenerator.instance
-        while tg.cal_token_count(chat_history) > config.CHAT_HISTORY_MAX_TOKENS:
-            offset += 1 # 如果对话历史过长，则逐行删除对话历史
-            chat_history = '\n\n\n'.join(self._chat_data.chat_history[-(config.CHAT_MEMORY_SHORT_LENGTH + offset):])
-            if offset > 99: # 如果对话历史删除执行出现问题，为了避免死循环，则只保留最后一条对话
-                chat_history = self._chat_data.chat_history[-1]
-                break
+        
+        # 精简窗口：Bot参与的对话历史
+        bot_history_len = min(len(self._chat_data.bot_interaction_history), config.CHAT_MEMORY_SHORT_LENGTH)
+        bot_interaction_history: str = '\n\n\n'.join(self._chat_data.bot_interaction_history[-bot_history_len:])
+        while bot_history_len > 1 and tg.cal_token_count(bot_interaction_history) > config.CHAT_HISTORY_MAX_TOKENS // 2:
+            bot_history_len -= 1
+            bot_interaction_history = '\n\n\n'.join(self._chat_data.bot_interaction_history[-bot_history_len:])
+        
+        # 全量窗口：群内所有消息上下文
+        context_len = min(len(self._chat_data.group_context_history), config.CHAT_MEMORY_SHORT_LENGTH)
+        group_context_history: str = '\n\n\n'.join(self._chat_data.group_context_history[-context_len:])
+        while context_len > 1 and tg.cal_token_count(group_context_history) > config.CHAT_HISTORY_MAX_TOKENS // 2:
+            context_len -= 1
+            group_context_history = '\n\n\n'.join(self._chat_data.group_context_history[-context_len:])
+        
+        # 兼容性：如果没有新窗口数据，回退到旧的历史记录
+        if not bot_interaction_history and not group_context_history and self._chat_data.chat_history:
+            history_len = min(len(self._chat_data.chat_history), config.CHAT_MEMORY_SHORT_LENGTH)
+            bot_interaction_history = '\n\n\n'.join(self._chat_data.chat_history[-history_len:])
+            while history_len > 1 and tg.cal_token_count(bot_interaction_history) > config.CHAT_HISTORY_MAX_TOKENS:
+                history_len -= 1
+                bot_interaction_history = '\n\n\n'.join(self._chat_data.chat_history[-history_len:])
 
         # 对话历史摘要
         summary = f"\n\n[Summary]: {self._chat_data.chat_summarized}" if self._chat_data.chat_summarized else ''  # 如果有对话历史摘要，则添加摘要
@@ -253,11 +295,19 @@ class Chat:
             "Minecraft游戏服务器聊天记录"
         ) if chat_type == 'server' else "聊天历史"
 
+        # 构建双窗口历史提示文本
+        history_sections = []
+        if bot_interaction_history:
+            history_sections.append(f"[与你的互动历史]\n{bot_interaction_history}")
+        if group_context_history:
+            history_sections.append(f"[群内当前上下文]\n{group_context_history}")
+        combined_history = '\n\n'.join(history_sections) if history_sections else "[暂无对话历史]"
+
         user_prompt_text = (
             f"[角色设定]\n{self.chat_preset.bot_self_introl}\n\n"
             f"{memory}{impression_text}{summary}"
             f"\n[{chat_history_title} (当前时间: {time.strftime('%Y-%m-%d %H:%M:%S %A')})]\n"
-            f"\n{chat_history}\n\n\n[{time.strftime('%H:%M:%S %p', time.localtime())}] {self.chat_preset.preset_key}:(生成{self.chat_preset.preset_key}的响应内容，排除'{self.chat_preset.preset_key}:'，不要生成任何其他人的回复。)"
+            f"\n{combined_history}\n\n\n[{time.strftime('%H:%M:%S %p', time.localtime())}] {self.chat_preset.preset_key}:(生成{self.chat_preset.preset_key}的响应内容，排除'{self.chat_preset.preset_key}:'，不要生成任何其他人的回复。)"
         )
 
         user_content: Any = user_prompt_text
@@ -384,7 +434,10 @@ class Chat:
             self._chat_data.chat_history.clear()
             self._chat_data.chat_image_history.clear()
             self._chat_data.chat_summarized = ''
-            if config.DEBUG_LEVEL > 0: logger.info(f"切换预设 [{self._preset_key}] → [{preset_key}]，已清理对话上下文")
+            # 清理双窗口历史
+            self._chat_data.bot_interaction_history.clear()
+            self._chat_data.group_context_history.clear()
+            if config.DEBUG_LEVEL > 0: logger.info(f"切换预设 [{self._preset_key}] → [{preset_key}]，已清理对话上下文（精简窗口和全量窗口）")
         self._chat_data.active_preset = preset_key
         self._preset_key = preset_key
         return (True, None)

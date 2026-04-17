@@ -103,12 +103,20 @@ class ChatData(StoreSerializable):
     """最近包含图片的消息，用于多模态上下文"""
     chat_summarized: str = field(default="")
     """总结"""
+    
+    # 双窗口历史记录
+    bot_interaction_history: List[str] = field(default_factory=lambda: [])
+    """与Bot的成功互动历史（精简窗口，仅包含Bot参与的双向对话）"""
+    group_context_history: List[str] = field(default_factory=lambda: [])
+    """群内当前上下文（全量窗口，包含所有用户消息，包括未@Bot的）"""
 
     def reset(self):
         """重置当前会话历史数据"""
         self.chat_history.clear()
         self.chat_image_history.clear()
         self.chat_summarized = ''
+        self.bot_interaction_history.clear()
+        self.group_context_history.clear()
 
         for k, v in self.preset_datas.items():
             v.reset_to_default(preset_config=config.PRESETS.get(k, None))

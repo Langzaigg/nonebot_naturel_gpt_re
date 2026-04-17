@@ -507,6 +507,11 @@ async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, ma
 
             if not success:
                 logger.warning("生成对话结果失败，跳过处理...")
+                # 如果是 token 超限错误，清理历史防止持续失败
+                if raw_res and ("400" in raw_res or "Bad Request" in raw_res or "token" in raw_res.lower()):
+                    logger.warning("检测到 token 超限错误，清理对话历史...")
+                    chat._chat_data.chat_history = chat._chat_data.chat_history[-5:]  # 只保留最后 5 条
+                    await matcher.send("[系统] 对话历史过长已自动清理，请继续对话")
                 if not raw_parts and raw_res:
                     await send_segment(raw_res)
                 return
@@ -526,7 +531,8 @@ async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, ma
 
             cost_token = tg.cal_token_count(str(prompt_template) + raw_res)
             if config.DEBUG_LEVEL > 0: logger.info(f"token消耗: {cost_token} | 对话响应: \"{raw_res}\"")
-            await chat.update_chat_history_row(sender=chat.preset_key, msg=raw_res, require_summary=True, record_time=False)
+            # 记录Bot回复，is_bot_reply=True表示同时更新精简窗口和全量窗口
+            await chat.update_chat_history_row(sender=chat.preset_key, msg=raw_res, require_summary=True, record_time=False, is_bot_reply=True)
             chat.update_send_time()
             await chat.update_chat_history_row_for_user(sender=chat.preset_key, msg=raw_res, userid=trigger_userid, username=sender_name, require_summary=True)
             PersistentDataManager.instance.save_to_file()
@@ -534,10 +540,4 @@ async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, ma
             return
         finally:
             _chat_running_tasks.pop(chat_key, None)
-    await chat.update_chat_history_row(sender=chat.preset_key, msg=raw_res, require_summary=True, record_time=False)
-    chat.update_send_time()
-    await chat.update_chat_history_row_for_user(sender=chat.preset_key, msg=raw_res, userid=trigger_userid, username=sender_name, require_summary=True)
-    PersistentDataManager.instance.save_to_file()
-    if config.DEBUG_LEVEL > 0: logger.info(f"对话响应完成 | 耗时: {time.time() - sta_time}s")
-    return
 
