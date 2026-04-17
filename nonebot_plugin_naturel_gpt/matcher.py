@@ -3,6 +3,8 @@ import random
 import re
 import time
 import os
+import tempfile
+from pathlib import Path
 from typing import Awaitable, List, Dict, Callable, Optional, Set, Tuple, Type
 from nonebot import on_command, on_message, on_notice
 from .logger import logger
@@ -32,6 +34,11 @@ is_progress:bool = False
 
 msg_sent_set:Set[str] = set() # bot 自己发送的消息
 
+# ======== 并发控制 ========
+# 同群打断，不同群排队
+_chat_response_lock = asyncio.Lock()                        # 全局锁，确保同时只有1个请求在执行
+_chat_running_tasks: Dict[str, asyncio.Task] = {}          # chat_key → 当前运行中的 Task
+
 """消息发送钩子，用于记录自己发送的消息(默认不开启，只有在用户自定义了message_sent事件之后message_sent事件才会被发送到 on_message 回调)"""
 # @Bot.on_called_api
 async def handle_group_message_sent(bot: Bot, exception: Optional[Exception], api: str, data: Dict[str, Any], result: Any):
@@ -42,6 +49,71 @@ async def handle_group_message_sent(bot: Bot, exception: Optional[Exception], ap
             msg_sent_set.add(f"{bot.self_id}_{msg_id}")
 
 """ ======== 注册消息响应器 ======== """
+
+
+async def _make_polaroid_image(image_url: str, author: Optional[str], pid: Optional[int]) -> Optional[str]:
+    """下载图片并加上拍立得风格装饰（白边 + 作者名），返回本地文件路径。失败返回 None。"""
+    try:
+        import httpx
+        from PIL import Image
+        from PIL.ImageDraw import ImageDraw as Draw
+        from PIL.ImageFont import truetype as load_font
+        import io
+    except ImportError:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(image_url)
+            resp.raise_for_status()
+            img_data = resp.content
+    except Exception as e:
+        logger.warning(f"拍立得图片下载失败: {e}")
+        return None
+
+    try:
+        img = Image.open(io.BytesIO(img_data)).convert("RGBA")
+        img_w, img_h = img.size
+
+        # 拍立得风格：下方留白 60px 用于写作者信息，上方/左右留白 16px
+        border = 16
+        caption_h = 60
+        canvas_w = img_w + border * 2
+        canvas_h = img_h + border * 2 + caption_h
+
+        # 纯白背景（拍立得相纸）
+        canvas = Image.new("RGBA", (canvas_w, canvas_h), (255, 255, 255, 255))
+
+        # 贴图：上方留白 16px，左右居中
+        canvas.paste(img, (border, border), img)
+
+        # 在底部 caption 区画作者名
+        draw = Draw(canvas)
+        caption_text = f"by {author}" if author else (f"PID:{pid}" if pid else "TuChan")
+        for attempt_text in [caption_text, "TuChan"]:
+            try:
+                font = load_font(r"C:\Windows\Fonts\msyh.ttc", 16)
+                text_bbox = draw.textbbox((0, 0), attempt_text, font=font)
+                text_w = text_bbox[2] - text_bbox[0]
+                text_x = max(border, (canvas_w - text_w) // 2)
+                text_y = img_h + border + 20
+                draw.text((text_x, text_y), attempt_text, font=font, fill=(120, 120, 120, 255))
+                break
+            except (UnicodeEncodeError, OSError, TypeError):
+                continue
+
+        # 保存到临时文件
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False, dir=tempfile.gettempdir())
+        tmp_path = tmp.name
+        tmp.close()
+        canvas.convert("RGB").save(tmp_path, "PNG")
+        return tmp_path
+
+    except Exception as e:
+        logger.warning(f"拍立得图片装饰失败: {e}")
+        return None
+
+
 # 注册qq消息响应器 收到任意消息时触发
 matcher:Type[Matcher] = on_message(priority=config.NG_MSG_PRIORITY, block=config.NG_BLOCK_OTHERS)
 @matcher.handle()
@@ -247,184 +319,221 @@ def _normalize_reply_segment(text: str) -> str:
 async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, matcher: Type[Matcher], chat_type: str, chat_key: str, sender_name: Optional[str] = None, wake_up: bool = False, loop_times=0, loop_data={}, bot:Bot = None, image_urls: Optional[List[str]] = None): # type: ignore
     """消息响应方法"""
 
-    sender_name = sender_name or 'anonymous'
-    chat:Chat = ChatManager.instance.get_or_create_chat(chat_key=chat_key)
+    # ======== 并发控制 ========
+    # 同群打断，不同群排队
+    async with _chat_response_lock:
+        # 同群有上一个请求在跑，打断它
+        if chat_key in _chat_running_tasks:
+            old_task = _chat_running_tasks.pop(chat_key)
+            old_task.cancel()
+            logger.info(f"[并发控制] 打断群 {chat_key} 的旧请求")
 
-    # 判断对话是否被禁用
-    if not chat.is_enable:
-        if config.DEBUG_LEVEL > 1: logger.info("对话已被禁用，跳过处理...")
-        return
+        # 记录当前任务，用于被后续请求打断
+        my_task = asyncio.current_task()
+        _chat_running_tasks[chat_key] = my_task
+        try:
+            sender_name = sender_name or 'anonymous'
+            chat:Chat = ChatManager.instance.get_or_create_chat(chat_key=chat_key)
 
-    # 检测是否包含违禁词
-    for w in config.WORD_FOR_FORBIDDEN:
-        if str(w).lower() in trigger_text.lower():
-            if config.DEBUG_LEVEL > 0: logger.info(f"检测到违禁词 {w}，拒绝处理...")
-            return
+            # 判断对话是否被禁用
+            if not chat.is_enable:
+                if config.DEBUG_LEVEL > 1: logger.info("对话已被禁用，跳过处理...")
+                return
 
-    # 唤醒词检测（支持当前激活角色名，仅在句首出现时无条件唤醒）
-    text_head = trigger_text.lower().lstrip()
-    wake_prefix = False
-    if chat.preset_key.lower() and text_head.startswith(chat.preset_key.lower()):
-        wake_prefix = True
-    for w in config.WORD_FOR_WAKE_UP:
-        if str(w).lower() and text_head.startswith(str(w).lower()):
-            wake_prefix = True
-            break
-    if wake_prefix:
-        wake_up = True
+            # 检测是否包含违禁词
+            for w in config.WORD_FOR_FORBIDDEN:
+                if str(w).lower() in trigger_text.lower():
+                    if config.DEBUG_LEVEL > 0: logger.info(f"检测到违禁词 {w}，拒绝处理...")
+                    return
 
-    # 随机回复判断（唤醒词不在句首时，也通过随机概率触发）
-    if not wake_up and random.random() < config.RANDOM_CHAT_PROBABILITY:
-        wake_up = True
-
-    # 其它人格唤醒判断
-    if chat.preset_key.lower() not in trigger_text.lower() and chat.enable_auto_switch_identity:
-        for preset_key in chat.preset_keys:
-            if preset_key.lower() in trigger_text.lower():
-                chat.change_presettings(preset_key)
-                logger.info(f"检测到 {preset_key} 的唤醒词，切换到 {preset_key} 的人格")
-                if chat_type != 'server':
-                    await matcher.send(f'[NG] 已切换到 {preset_key} (￣▽￣)-ok !')
+            # 唤醒词检测（支持当前激活角色名，仅在句首出现时无条件唤醒）
+            text_head = trigger_text.lower().lstrip()
+            wake_prefix = False
+            if chat.preset_key.lower() and text_head.startswith(chat.preset_key.lower()):
+                wake_prefix = True
+            for w in config.WORD_FOR_WAKE_UP:
+                if str(w).lower() and text_head.startswith(str(w).lower()):
+                    wake_prefix = True
+                    break
+            if wake_prefix:
                 wake_up = True
-                break
 
-    current_preset_key = chat.preset_key
+            # 随机回复判断（唤醒词不在句首时，也通过随机概率触发）
+            if not wake_up and random.random() < config.RANDOM_CHAT_PROBABILITY:
+                wake_up = True
 
-    # 判断是否需要回复
-    if (    # 如果不是 bot 相关的信息，则直接返回
-        wake_up or \
-        (random.random() < config.REPLY_ON_NAME_MENTION_PROBABILITY and (any(n.lower() in trigger_text.lower() for n in list(BotSelfConfig.nickname) + [chat.preset_key]))) or \
-        (config.REPLY_ON_AT and is_tome and '全体成员' not in trigger_text.lower())
-    ):
-        # 更新全局对话历史记录
-        # chat.update_chat_history_row(sender=sender_name, msg=trigger_text, require_summary=True)
-        await chat.update_chat_history_row(sender=sender_name,
-                                    msg=f"@{chat.preset_key} {trigger_text}" if is_tome and chat_type=='group' else trigger_text,
-                                    require_summary=False, record_time=True, images=image_urls)    # 只有在需要回复时才记录时间，用于节流
-        logger.info("符合 bot 发言条件，进行回复...")
-    else:
-        if config.CHAT_ENABLE_RECORD_ORTHER:
-            await chat.update_chat_history_row(sender=sender_name, msg=trigger_text, require_summary=False, record_time=False, images=image_urls)
-            if config.DEBUG_LEVEL > 1: logger.info("不是 bot 相关的信息，记录但不进行回复")
-        else:
-            if config.DEBUG_LEVEL > 1: logger.info("不是 bot 相关的信息，不进行回复")
-        return
-    
-    wake_up = False # 进入对话流程，重置唤醒状态
+            # 其它人格唤醒判断
+            if chat.preset_key.lower() not in trigger_text.lower() and chat.enable_auto_switch_identity:
+                for preset_key in chat.preset_keys:
+                    if preset_key.lower() in trigger_text.lower():
+                        chat.change_presettings(preset_key)
+                        logger.info(f"检测到 {preset_key} 的唤醒词，切换到 {preset_key} 的人格")
+                        if chat_type != 'server':
+                            await matcher.send(f'[NG] 已切换到 {preset_key} (￣▽￣)-ok !')
+                        wake_up = True
+                        break
 
-    # 记录对用户的对话信息
-    await chat.update_chat_history_row_for_user(sender=sender_name, msg=trigger_text, userid=trigger_userid, username=sender_name, require_summary=False)
+            current_preset_key = chat.preset_key
 
-    if chat.preset_key != current_preset_key:
-        if config.DEBUG_LEVEL > 0: logger.warning(f'等待OpenAI请求返回的过程中人格预设由[{current_preset_key}]切换为[{chat.preset_key}],当前消息不再继续响应.1')
-        return
-    
-    # 节流判断 接收到消息后等待一段时间，如果在这段时间内再次收到消息，则跳过响应处理
-    # 效果表现为：如果在一段时间内连续收到消息，则只响应最后一条消息
-    last_recv_time = chat.last_msg_time
-    await asyncio.sleep(config.REPLY_THROTTLE_TIME)
-    if last_recv_time != chat.last_msg_time: # 如果最后一条消息时间不一致，说明在节流时间内收到了新消息，跳过处理
-        if config.DEBUG_LEVEL > 0: logger.info('节流时间内收到新消息，跳过处理...')
-        return
-    
-    # 主动聊天参与逻辑 *待定方案
-    # 达到一定兴趣阈值后，开始进行一次启动发言准备 收集特定条数的对话历史作为发言参考
-    # 启动发言后，一段时间内兴趣值逐渐下降，如果随后被呼叫，则兴趣值提升
-    # 监测对话历史中是否有足够的话题参与度，如果有，则继续提高话题参与度，否则，降低话题参与度
-    # 兴趣值影响发言频率，兴趣值越高，发言频率越高
-    # 如果监测到对话记录中有不满情绪(如: 闭嘴、滚、不理你、安静等)，则大幅降低兴趣值并且降低发言频率，同时进入一段时间的沉默期(0-120分钟)
-    # 沉默期中降低响应"提及"的概率，沉默期中被直接at，则恢复一定兴趣值提升兴趣值并取消沉默期
-    # 兴趣值会影响回复的速度，兴趣值越高，回复速度越快
-    # 发言概率贡献比例 = (随机值: 10% + 话题参与度: 50% + 兴趣值: 40%) * 发言几率基数(0.01~1.0)
+            # 判断是否需要回复
+            if (    # 如果不是 bot 相关的信息，则直接返回
+                wake_up or \
+                (random.random() < config.REPLY_ON_NAME_MENTION_PROBABILITY and (any(n.lower() in trigger_text.lower() for n in list(BotSelfConfig.nickname) + [chat.preset_key]))) or \
+                (config.REPLY_ON_AT and is_tome and '全体成员' not in trigger_text.lower())
+            ):
+                await chat.update_chat_history_row(sender=sender_name,
+                                            msg=f"@{chat.preset_key} {trigger_text}" if is_tome and chat_type=='group' else trigger_text,
+                                            require_summary=False, record_time=True, images=image_urls)
+                logger.info("符合 bot 发言条件，进行回复...")
+            else:
+                if config.CHAT_ENABLE_RECORD_ORTHER:
+                    await chat.update_chat_history_row(sender=sender_name, msg=trigger_text, require_summary=False, record_time=False, images=image_urls)
+                    if config.DEBUG_LEVEL > 1: logger.info("不是 bot 相关的信息，记录但不进行回复")
+                else:
+                    if config.DEBUG_LEVEL > 1: logger.info("不是 bot 相关的信息，不进行回复")
+                return
 
-    sta_time:float = time.time()
+            wake_up = False # 进入对话流程，重置唤醒状态
 
-    # 生成对话 prompt 模板
-    prompt_template = chat.get_chat_prompt_template(userid=trigger_userid, chat_type=chat_type)
-    tg = TextGenerator.instance
-    req_tokens = tg.cal_token_count(str(prompt_template))
-    logger.info(f"生成 prompt 完成，请求 token 数: {req_tokens}")
-    # 生成 log 输出用的 prompt 模板
-    log_prompt_template = '\n'.join([f"[{m['role']}]\n{m['content']}\n" for m in prompt_template]) if isinstance(prompt_template, list) else prompt_template
-    if config.DEBUG_LEVEL > 0:
-        # logger.info("对话 prompt 模板: \n" + str(log_prompt_template))
-        # 保存 prompt 模板到日志文件
-        with open(os.path.join(config.NG_LOG_PATH, f"{chat_key}.{time.strftime('%Y-%m-%d %H-%M-%S')}.prompt.log"), 'a', encoding='utf-8') as f:
-            f.write(f"prompt 模板: \n{log_prompt_template}\n")
-        logger.info(f"对话 prompt 模板已保存到日志文件: {chat_key}.{time.strftime('%Y-%m-%d %H-%M-%S')}.prompt.log")
+            # 记录对用户的对话信息
+            await chat.update_chat_history_row_for_user(sender=sender_name, msg=trigger_text, userid=trigger_userid, username=sender_name, require_summary=False)
 
-    chat.update_gen_time()  # 更新上次生成时间
-    time_before_request = time.time()
-    reply_prefix = f'<{chat.preset_key}> ' if (chat_type == 'server') else ''
-    raw_parts: List[str] = []
-    stream_buffer = ""
-    sent_segments = 0
-    last_send_time = 0.0
+            if chat.preset_key != current_preset_key:
+                if config.DEBUG_LEVEL > 0: logger.warning(f'等待OpenAI请求返回的过程中人格预设由[{current_preset_key}]切换为[{chat.preset_key}],当前消息不再继续响应.1')
+                return
 
-    async def send_segment(segment: str) -> None:
-        nonlocal sent_segments, last_send_time
-        reply_text = _normalize_reply_segment(segment)
-        if not reply_text:
+            # 节流判断
+            last_recv_time = chat.last_msg_time
+            await asyncio.sleep(config.REPLY_THROTTLE_TIME)
+            if last_recv_time != chat.last_msg_time:
+                if config.DEBUG_LEVEL > 0: logger.info('节流时间内收到新消息，跳过处理...')
+                return
+
+            sta_time:float = time.time()
+
+            # 生成对话 prompt 模板
+            prompt_template = chat.get_chat_prompt_template(userid=trigger_userid, chat_type=chat_type)
+            tg = TextGenerator.instance
+            req_tokens = tg.cal_token_count(str(prompt_template))
+            logger.info(f"生成 prompt 完成，请求 token 数: {req_tokens}")
+            log_prompt_template = '\n'.join([f"[{m['role']}]\n{m['content']}\n" for m in prompt_template]) if isinstance(prompt_template, list) else prompt_template
+            if config.DEBUG_LEVEL > 0:
+                with open(os.path.join(config.NG_LOG_PATH, f"{chat_key}.{time.strftime('%Y-%m-%d %H-%M-%S')}.prompt.log"), 'a', encoding='utf-8') as f:
+                    f.write(f"prompt 模板: \n{log_prompt_template}\n")
+                logger.info(f"对话 prompt 模板已保存到日志文件: {chat_key}.{time.strftime('%Y-%m-%d %H-%M-%S')}.prompt.log")
+
+            chat.update_gen_time()  # 更新上次生成时间
+            time_before_request = time.time()
+            reply_prefix = f'<{chat.preset_key}> ' if (chat_type == 'server') else ''
+            raw_parts: List[str] = []
+            stream_buffer = ""
+            sent_segments = 0
+            last_send_time = 0.0
+
+            async def send_segment(segment: str) -> None:
+                nonlocal sent_segments, last_send_time
+                reply_text = _normalize_reply_segment(segment)
+                if not reply_text:
+                    return
+                if re.match(r'^[^\u4e00-\u9fa5\w]{1}$', reply_text):
+                    return
+                now = time.time()
+                wait_time = max(0.0, float(config.REPLY_SEGMENT_INTERVAL) - (now - last_send_time))
+                if wait_time > 0:
+                    await asyncio.sleep(wait_time)
+                await matcher.send(f"{reply_prefix}{reply_text}")
+                sent_segments += 1
+                last_send_time = time.time()
+
+            async def on_text_chunk(chunk: str) -> None:
+                nonlocal stream_buffer
+                raw_parts.append(chunk)
+                stream_buffer += chunk
+                if not config.NG_ENABLE_MSG_SPLIT:
+                    return
+                while sent_segments < max(1, config.REPLY_MAX_SEGMENTS) - 1 and "\n\n" in stream_buffer:
+                    segment, stream_buffer = stream_buffer.split("\n\n", 1)
+                    await send_segment(segment)
+
+            async def on_reasoning_chunk(chunk: str) -> None:
+                if config.LLM_SHOW_REASONING:
+                    await on_text_chunk(chunk)
+
+            raw_res, success = await tg.stream_response(
+                prompt=prompt_template,
+                type='chat',
+                custom={'bot_name': chat.preset_key, 'sender_name': sender_name},
+                plugin_config=config,
+                on_text=on_text_chunk,
+                on_reasoning=on_reasoning_chunk,
+            )  # 生成对话结果
+
+            # 工具产生的图片（如pixiv搜图）始终发送，不受后续错误影响
+            for tool_output in tg.consume_tool_outputs():
+                if tool_output.get("type") == "image" and tool_output.get("url"):
+                    image_url = tool_output["url"]
+                    author = tool_output.get("author")
+                    pid = tool_output.get("pid")
+                    gallery_url = tool_output.get("gallery_url")
+
+                    # 第一档：直接发原图
+                    try:
+                        await matcher.send(MessageSegment.image(file=image_url))
+                        continue
+                    except Exception as e:
+                        logger.warning(f"图片直接发送失败 ({image_url}): {e}")
+
+                    # 第二档：拍立得装饰后重试
+                    polaroid_path = None
+                    try:
+                        polaroid_path = await _make_polaroid_image(image_url, author, pid)
+                        if polaroid_path:
+                            await matcher.send(MessageSegment.image(file=polaroid_path))
+                            continue
+                    except Exception as e2:
+                        logger.warning(f"拍立得图片发送也失败: {e2}")
+                    finally:
+                        if polaroid_path:
+                            try:
+                                Path(polaroid_path).unlink(missing_ok=True)
+                            except Exception:
+                                pass
+
+                    # 第三档：发 Pixiv 画廊链接
+                    if gallery_url:
+                        await matcher.send(f"图片发送失败，Pixiv 画廊链接：{gallery_url}")
+                    else:
+                        await matcher.send(f"[图片]({image_url})")
+
+            if not success:
+                logger.warning("生成对话结果失败，跳过处理...")
+                if not raw_parts and raw_res:
+                    await send_segment(raw_res)
+                return
+
+            raw_res = raw_res or ''.join(raw_parts)
+
+            if stream_buffer:
+                await send_segment(stream_buffer)
+
+            if time.time() - time_before_request > config.OPENAI_TIMEOUT:
+                logger.warning(f'OpenAI响应超过timeout值[{config.OPENAI_TIMEOUT}]，停止处理')
+                return
+
+            if chat.preset_key != current_preset_key:
+                if config.DEBUG_LEVEL > 0: logger.warning(f'等待OpenAI响应返回的过程中人格预设由[{current_preset_key}]切换为[{chat.preset_key}],当前消息不再继续处理.2')
+                return
+
+            cost_token = tg.cal_token_count(str(prompt_template) + raw_res)
+            if config.DEBUG_LEVEL > 0: logger.info(f"token消耗: {cost_token} | 对话响应: \"{raw_res}\"")
+            await chat.update_chat_history_row(sender=chat.preset_key, msg=raw_res, require_summary=True, record_time=False)
+            chat.update_send_time()
+            await chat.update_chat_history_row_for_user(sender=chat.preset_key, msg=raw_res, userid=trigger_userid, username=sender_name, require_summary=True)
+            PersistentDataManager.instance.save_to_file()
+            if config.DEBUG_LEVEL > 0: logger.info(f"对话响应完成 | 耗时: {time.time() - sta_time}s")
             return
-        if re.match(r'^[^\u4e00-\u9fa5\w]{1}$', reply_text):
-            return
-        now = time.time()
-        wait_time = max(0.0, float(config.REPLY_SEGMENT_INTERVAL) - (now - last_send_time))
-        if wait_time > 0:
-            await asyncio.sleep(wait_time)
-        await matcher.send(f"{reply_prefix}{reply_text}")
-        sent_segments += 1
-        last_send_time = time.time()
-
-    async def on_text_chunk(chunk: str) -> None:
-        nonlocal stream_buffer
-        raw_parts.append(chunk)
-        stream_buffer += chunk
-        if not config.NG_ENABLE_MSG_SPLIT:
-            return
-        while sent_segments < max(1, config.REPLY_MAX_SEGMENTS) - 1 and "\n\n" in stream_buffer:
-            segment, stream_buffer = stream_buffer.split("\n\n", 1)
-            await send_segment(segment)
-
-    async def on_reasoning_chunk(chunk: str) -> None:
-        if config.LLM_SHOW_REASONING:
-            await on_text_chunk(chunk)
-
-    raw_res, success = await tg.stream_response(
-        prompt=prompt_template,
-        type='chat',
-        custom={'bot_name': chat.preset_key, 'sender_name': sender_name},
-        plugin_config=config,
-        on_text=on_text_chunk,
-        on_reasoning=on_reasoning_chunk,
-    )  # 生成对话结果
-
-    # 工具产生的图片（如pixiv搜图）始终发送，不受后续错误影响
-    for tool_output in tg.consume_tool_outputs():
-        if tool_output.get("type") == "image" and tool_output.get("url"):
-            await matcher.send(MessageSegment.image(file=tool_output["url"]))
-
-    if not success:
-        logger.warning("生成对话结果失败，跳过处理...")
-        if not raw_parts and raw_res:
-            await send_segment(raw_res)
-        return
-
-    raw_res = raw_res or ''.join(raw_parts)
-
-    if stream_buffer:
-        await send_segment(stream_buffer)
-
-    if time.time() - time_before_request > config.OPENAI_TIMEOUT:
-        logger.warning(f'OpenAI响应超过timeout值[{config.OPENAI_TIMEOUT}]，停止处理')
-        return
-
-    if chat.preset_key != current_preset_key:
-        if config.DEBUG_LEVEL > 0: logger.warning(f'等待OpenAI响应返回的过程中人格预设由[{current_preset_key}]切换为[{chat.preset_key}],当前消息不再继续处理.2')
-        return
-
-    cost_token = tg.cal_token_count(str(prompt_template) + raw_res)
-    if config.DEBUG_LEVEL > 0: logger.info(f"token消耗: {cost_token} | 对话响应: \"{raw_res}\"")
+        finally:
+            _chat_running_tasks.pop(chat_key, None)
     await chat.update_chat_history_row(sender=chat.preset_key, msg=raw_res, require_summary=True, record_time=False)
     chat.update_send_time()
     await chat.update_chat_history_row_for_user(sender=chat.preset_key, msg=raw_res, userid=trigger_userid, username=sender_name, require_summary=True)
