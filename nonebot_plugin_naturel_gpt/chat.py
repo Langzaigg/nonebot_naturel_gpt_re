@@ -7,6 +7,7 @@ from .logger import logger
 from .config import *
 from .openai_func import TextGenerator
 from .persistent_data_manager import ImpressionData, ChatData, PresetData
+from .persona_loader import load_personas_from_directory
 
 # 会话类
 class Chat:
@@ -43,7 +44,7 @@ class Chat:
         self.change_presettings(preset_key)
 
     async def update_chat_history_row(self, sender:str, msg: str, require_summary:bool = False, record_time=False, images: Optional[List[str]] = None, is_bot_reply: bool = False) -> None:
-        """更新当前会话的全局对话历史行
+        """更新当前预设的对话历史行
         
         Args:
             is_bot_reply: 是否为Bot的回复，用于区分更新哪个窗口
@@ -53,17 +54,23 @@ class Chat:
         tg = TextGenerator.instance
         messageunit = tg.generate_msg_template(sender=sender, msg=msg, time_str=f"[{time.strftime('%H:%M:%S %p', time.localtime())}] ")
         
+        # 获取当前预设的数据
+        preset = self.chat_preset_dicts.get(self._preset_key)
+        if not preset:
+            logger.error(f"[会话: {self.chat_key}] 无法获取当前预设 '{self._preset_key}' 的数据")
+            return
+        
         # 同时更新旧的历史记录以保持兼容
         self._chat_data.chat_history.append(messageunit)
         
-        # 更新双窗口历史
+        # 更新当前预设的双窗口历史
         if is_bot_reply:
             # Bot的回复：同时更新精简窗口和全量窗口
-            self._chat_data.bot_interaction_history.append(messageunit)
-            self._chat_data.group_context_history.append(messageunit)
+            preset.bot_interaction_history.append(messageunit)
+            preset.group_context_history.append(messageunit)
         else:
             # 用户消息：只更新全量窗口（群内上下文）
-            self._chat_data.group_context_history.append(messageunit)
+            preset.group_context_history.append(messageunit)
         
         if images and config.MULTIMODAL_ENABLE:
             self._chat_data.chat_image_history.append({
@@ -79,9 +86,10 @@ class Chat:
             else:
                 self._chat_data.chat_image_history = []
         
-        if config.DEBUG_LEVEL > 0: logger.info(f"[会话: {self.chat_key}]添加对话历史行: {messageunit}  |  "
-                    f"精简窗口: {len(self._chat_data.bot_interaction_history)}条  "
-                    f"全量窗口: {len(self._chat_data.group_context_history)}条")
+        if config.DEBUG_LEVEL > 0: 
+            logger.info(f"[会话: {self.chat_key}][预设: {self._preset_key}]添加对话历史行: {messageunit}  |  "
+                       f"精简窗口: {len(preset.bot_interaction_history)}条  "
+                       f"全量窗口: {len(preset.group_context_history)}条")
         
         if record_time:
             self._last_msg_time = time.time()   # 更新上次对话时间
@@ -89,10 +97,10 @@ class Chat:
         # 维护窗口大小
         while len(self._chat_data.chat_history) > config.CHAT_MEMORY_MAX_LENGTH * 2:
             self._chat_data.chat_history.pop(0)
-        while len(self._chat_data.bot_interaction_history) > config.CHAT_MEMORY_SHORT_LENGTH:
-            self._chat_data.bot_interaction_history.pop(0)
-        while len(self._chat_data.group_context_history) > config.CHAT_MEMORY_MAX_LENGTH:
-            self._chat_data.group_context_history.pop(0)
+        while len(preset.bot_interaction_history) > config.CHAT_MEMORY_SHORT_LENGTH:
+            preset.bot_interaction_history.pop(0)
+        while len(preset.group_context_history) > config.CHAT_MEMORY_MAX_LENGTH:
+            preset.group_context_history.pop(0)
 
         if len(self._chat_data.chat_history) > config.CHAT_MEMORY_MAX_LENGTH and require_summary and config.CHAT_ENABLE_SUMMARY_CHAT:
             prev_summarized = f"上次对话摘要：{self._chat_data.chat_summarized}\n\n"
@@ -210,24 +218,33 @@ class Chat:
                 f"{memory_text}\n"
             ) if memory_text else ''
 
-        # 对话历史 - 双窗口设计
+        # 对话历史 - 双窗口设计（从当前预设读取）
         # 1. 精简窗口：与Bot的成功互动历史（用于角色理解和长期记忆）
         # 2. 全量窗口：群内当前上下文（用于了解当前讨论话题）
         tg = TextGenerator.instance
         
+        # 获取当前预设的历史数据
+        preset = self.chat_preset_dicts.get(self._preset_key)
+        if preset:
+            bot_hist = preset.bot_interaction_history
+            ctx_hist = preset.group_context_history
+        else:
+            bot_hist = []
+            ctx_hist = []
+        
         # 精简窗口：Bot参与的对话历史
-        bot_history_len = min(len(self._chat_data.bot_interaction_history), config.CHAT_MEMORY_SHORT_LENGTH)
-        bot_interaction_history: str = '\n\n\n'.join(self._chat_data.bot_interaction_history[-bot_history_len:])
+        bot_history_len = min(len(bot_hist), config.CHAT_MEMORY_SHORT_LENGTH)
+        bot_interaction_history: str = '\n\n\n'.join(bot_hist[-bot_history_len:])
         while bot_history_len > 1 and tg.cal_token_count(bot_interaction_history) > config.CHAT_HISTORY_MAX_TOKENS // 2:
             bot_history_len -= 1
-            bot_interaction_history = '\n\n\n'.join(self._chat_data.bot_interaction_history[-bot_history_len:])
+            bot_interaction_history = '\n\n\n'.join(bot_hist[-bot_history_len:])
         
         # 全量窗口：群内所有消息上下文
-        context_len = min(len(self._chat_data.group_context_history), config.CHAT_MEMORY_SHORT_LENGTH)
-        group_context_history: str = '\n\n\n'.join(self._chat_data.group_context_history[-context_len:])
+        context_len = min(len(ctx_hist), config.CHAT_MEMORY_SHORT_LENGTH)
+        group_context_history: str = '\n\n\n'.join(ctx_hist[-context_len:])
         while context_len > 1 and tg.cal_token_count(group_context_history) > config.CHAT_HISTORY_MAX_TOKENS // 2:
             context_len -= 1
-            group_context_history = '\n\n\n'.join(self._chat_data.group_context_history[-context_len:])
+            group_context_history = '\n\n\n'.join(ctx_hist[-context_len:])
         
         # 兼容性：如果没有新窗口数据，回退到旧的历史记录
         if not bot_interaction_history and not group_context_history and self._chat_data.chat_history:
@@ -360,9 +377,20 @@ class Chat:
         return self._chat_data.preset_datas
 
     @property
-    def chat_preset(self)->PresetData:
-        """获取当前正在使用的预设的数据"""
-        return self.chat_preset_dicts[self.preset_key]
+    def chat_preset(self) -> PresetData:
+        """获取当前正在使用的预设的数据，并热加载 md 文件内容"""
+        preset = self.chat_preset_dicts[self.preset_key]
+        # 热加载：从 md 文件实时读取人设内容
+        try:
+            personas = load_personas_from_directory(str(config.get_persona_dir()))
+            if self.preset_key in personas:
+                preset.bot_self_introl = personas[self.preset_key]
+                if config.DEBUG_LEVEL > 0:
+                    logger.info(f"[热加载] 已更新预设 '{self.preset_key}' 的人格设定")
+        except Exception as e:
+            if config.DEBUG_LEVEL > 0:
+                logger.warning(f"[热加载] 加载预设 '{self.preset_key}' 失败: {e}")
+        return preset
 
     @property
     def is_using_default_preset(self) -> bool:
@@ -422,22 +450,30 @@ class Chat:
         """开关当前会话自动切换人格"""
         self._chat_data.enable_auto_switch_identity = enabled
     
-    def change_presettings(self, preset_key:str) -> Tuple[bool, Optional[str]]:
-        """修改对话预设，切换时清理上下文（保留各预设的印象和记忆）"""
-        if preset_key not in self.chat_preset_dicts:    # 如果聊天预设字典中没有该预设，则从全局预设字典中拷贝一个
+    def change_presettings(self, preset_key: str) -> Tuple[bool, Optional[str]]:
+        """修改对话预设，切换时保留当前预设的历史，加载目标预设的历史"""
+        if preset_key not in self.chat_preset_dicts:  # 如果聊天预设字典中没有该预设，则从全局预设字典中拷贝一个
             preset_config = config.PRESETS.get(preset_key, None)
             if not preset_config:
                 return (False, '预设不存在')
             self.add_preset_from_config(preset_key, preset_config)
-            if config.DEBUG_LEVEL > 0: logger.info(f"从全局预设中拷贝预设 {preset_key} 到聊天预设字典")
+            if config.DEBUG_LEVEL > 0:
+                logger.info(f"从全局预设中拷贝预设 {preset_key} 到聊天预设字典")
+        
         if preset_key != self._preset_key:
-            self._chat_data.chat_history.clear()
-            self._chat_data.chat_image_history.clear()
-            self._chat_data.chat_summarized = ''
-            # 清理双窗口历史
-            self._chat_data.bot_interaction_history.clear()
-            self._chat_data.group_context_history.clear()
-            if config.DEBUG_LEVEL > 0: logger.info(f"切换预设 [{self._preset_key}] → [{preset_key}]，已清理对话上下文（精简窗口和全量窗口）")
+            # 不再清理历史，而是切换到目标预设的历史
+            # 每个预设的历史保存在 preset_datas[preset_key] 中
+            if config.DEBUG_LEVEL > 0:
+                old_preset = self.chat_preset_dicts.get(self._preset_key)
+                new_preset = self.chat_preset_dicts.get(preset_key)
+                old_bot_hist_len = len(old_preset.bot_interaction_history) if old_preset else 0
+                old_ctx_hist_len = len(old_preset.group_context_history) if old_preset else 0
+                new_bot_hist_len = len(new_preset.bot_interaction_history) if new_preset else 0
+                new_ctx_hist_len = len(new_preset.group_context_history) if new_preset else 0
+                logger.info(f"切换预设 [{self._preset_key}] → [{preset_key}] | "
+                          f"旧预设历史: {old_bot_hist_len}/{old_ctx_hist_len}条 | "
+                          f"新预设历史: {new_bot_hist_len}/{new_ctx_hist_len}条")
+        
         self._chat_data.active_preset = preset_key
         self._preset_key = preset_key
         return (True, None)

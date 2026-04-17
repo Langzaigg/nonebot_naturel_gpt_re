@@ -31,7 +31,7 @@ class ImpressionData(StoreSerializable):
 class PresetData(StoreSerializable):
     """特定chat_key的特定preset人格预设及其产生的聊天数据"""
     preset_key: str = field(default="")
-    bot_self_introl: str = field(default="")
+    # bot_self_introl 不再持久化存储，改为运行时从 md 文件热加载
     is_locked: bool = field(default=False)
     """是否锁定人格，锁定后无法编辑人格"""
     is_default: bool = field(default=False)
@@ -43,6 +43,12 @@ class PresetData(StoreSerializable):
         default_factory=dict)  # 对(群聊中)特定用户的印象
     chat_memory: Dict[str, str] = field(default_factory=dict)
     """当前预设的记忆"""
+    
+    # 双窗口历史记录 - 每个预设独立存储
+    bot_interaction_history: List[str] = field(default_factory=lambda: [])
+    """与该预设的成功互动历史（精简窗口）"""
+    group_context_history: List[str] = field(default_factory=lambda: [])
+    """该预设下的群内上下文（全量窗口）"""
 
     @classmethod
     def create_from_config(cls, preset_config: PresetConfig):
@@ -96,27 +102,19 @@ class ChatData(StoreSerializable):
     preset_datas: Dict[str, PresetData] = field(default_factory=lambda: {})
     """[preset_name, data]"""
 
-    # 以下为对话产生的数据
+    # 以下为对话产生的数据（已弃用，保留兼容性）
     chat_history: List[str] = field(default_factory=lambda: [])
-    """当前会话的全局对话历史"""
+    """当前会话的全局对话历史（已弃用，历史记录现在存储在 preset_datas 中）"""
     chat_image_history: List[Dict[str, Any]] = field(default_factory=lambda: [])
     """最近包含图片的消息，用于多模态上下文"""
     chat_summarized: str = field(default="")
-    """总结"""
-    
-    # 双窗口历史记录
-    bot_interaction_history: List[str] = field(default_factory=lambda: [])
-    """与Bot的成功互动历史（精简窗口，仅包含Bot参与的双向对话）"""
-    group_context_history: List[str] = field(default_factory=lambda: [])
-    """群内当前上下文（全量窗口，包含所有用户消息，包括未@Bot的）"""
+    """总结（已弃用，保留兼容性）"""
 
     def reset(self):
         """重置当前会话历史数据"""
         self.chat_history.clear()
         self.chat_image_history.clear()
         self.chat_summarized = ''
-        self.bot_interaction_history.clear()
-        self.group_context_history.clear()
 
         for k, v in self.preset_datas.items():
             v.reset_to_default(preset_config=config.PRESETS.get(k, None))
