@@ -5,7 +5,7 @@ import time
 import os
 import tempfile
 from pathlib import Path
-from typing import Awaitable, List, Dict, Callable, Optional, Set, Tuple, Type
+from typing import Any, Awaitable, List, Dict, Callable, Optional, Set, Tuple, Type
 from nonebot import on_command, on_message, on_notice
 from .logger import logger
 from nonebot.params import CommandArg
@@ -35,9 +35,18 @@ is_progress:bool = False
 msg_sent_set:Set[str] = set() # bot 自己发送的消息
 
 # ======== 并发控制 ========
-# 同群打断，不同群排队
-_chat_response_lock = asyncio.Lock()                        # 全局锁，确保同时只有1个请求在执行
+# 不同会话并行；同一会话新请求取消旧请求，并把新旧问题合并后重新生成。
+class _NoopAsyncLock:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+_chat_response_lock = _NoopAsyncLock()
 _chat_running_tasks: Dict[str, asyncio.Task] = {}          # chat_key → 当前运行中的 Task
+_chat_active_inputs: Dict[str, Dict[str, Any]] = {}        # chat_key → 当前请求输入快照
 
 """消息发送钩子，用于记录自己发送的消息(默认不开启，只有在用户自定义了message_sent事件之后message_sent事件才会被发送到 on_message 回调)"""
 # @Bot.on_called_api
@@ -316,12 +325,69 @@ def _normalize_reply_segment(text: str) -> str:
     return text.strip().strip("*';；").rstrip("。").strip()
 
 
-async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, matcher: Type[Matcher], chat_type: str, chat_key: str, sender_name: Optional[str] = None, wake_up: bool = False, loop_times=0, loop_data={}, bot:Bot = None, image_urls: Optional[List[str]] = None): # type: ignore
+def _is_bad_request_error(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    lower_text = text.lower()
+    return "http 400" in lower_text or "status code: 400" in lower_text or "bad request" in lower_text
+
+
+def _is_probably_image_bad_request(text: Optional[str]) -> bool:
+    if not text:
+        return False
+    lower_text = text.lower()
+    image_markers = ("image_url", "image url", "invalid image", "download", "fetch", "url", "vision")
+    return _is_bad_request_error(text) and any(marker in lower_text for marker in image_markers)
+
+
+def _prompt_contains_images(prompt: List[Dict[str, Any]]) -> bool:
+    for message in prompt:
+        content = message.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "image_url":
+                    return True
+    return False
+
+
+def _count_prompt_text_and_images(prompt: List[Dict[str, Any]], tg: TextGenerator) -> Tuple[int, int]:
+    text_parts: List[str] = []
+    image_count = 0
+    for message in prompt:
+        content = message.get("content")
+        if isinstance(content, list):
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "text":
+                    text_parts.append(str(item.get("text") or ""))
+                elif item.get("type") == "image_url":
+                    image_count += 1
+        elif content is not None:
+            text_parts.append(str(content))
+    return tg.cal_token_count("\n".join(text_parts)), image_count
+
+
+async def do_msg_response(
+    trigger_userid: str,
+    trigger_text: str,
+    is_tome: bool,
+    matcher: Type[Matcher],
+    chat_type: str,
+    chat_key: str,
+    sender_name: Optional[str] = None,
+    wake_up: bool = False,
+    loop_times=0,
+    loop_data={},
+    bot: Bot = None,
+    image_urls: Optional[List[str]] = None,
+): # type: ignore
     """消息响应方法"""
 
     # ======== 并发控制 ========
     # 同群打断，不同群排队
     async with _chat_response_lock:
+        old_input = _chat_active_inputs.get(chat_key)
         # 同群有上一个请求在跑，打断它
         if chat_key in _chat_running_tasks:
             old_task = _chat_running_tasks.pop(chat_key)
@@ -334,6 +400,34 @@ async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, ma
         try:
             sender_name = sender_name or 'anonymous'
             chat:Chat = ChatManager.instance.get_or_create_chat(chat_key=chat_key)
+            content_is_labeled = False
+            if old_input:
+                old_text = str(old_input.get("text") or "").strip()
+                old_sender = str(old_input.get("sender") or "").strip()
+                new_text = trigger_text.strip()
+                if old_sender and old_sender != sender_name:
+                    merged_parts = []
+                    if old_text:
+                        merged_parts.append(f"{old_sender}: {old_text}")
+                    if new_text:
+                        merged_parts.append(f"{sender_name}: {new_text}")
+                    trigger_text = "\n\n".join(merged_parts)
+                    content_is_labeled = True
+                else:
+                    merged_parts = [part for part in [old_text, new_text] if part]
+                    trigger_text = "\n\n".join(merged_parts)
+                image_urls = list(old_input.get("images") or []) + list(image_urls or [])
+                if old_input.get("recorded"):
+                    chat.remove_last_prompt_user_message()
+                if config.DEBUG_LEVEL > 0:
+                    logger.info(f"[并发控制] 已合并旧新提问: {chat_key}")
+
+            _chat_active_inputs[chat_key] = {
+                "text": trigger_text,
+                "sender": sender_name,
+                "images": list(image_urls or []),
+                "recorded": False,
+            }
 
             # 判断对话是否被禁用
             if not chat.is_enable:
@@ -376,19 +470,32 @@ async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, ma
             current_preset_key = chat.preset_key
 
             # 判断是否需要回复
-            if (    # 如果不是 bot 相关的信息，则直接返回
-                wake_up or \
-                (random.random() < config.REPLY_ON_NAME_MENTION_PROBABILITY and (any(n.lower() in trigger_text.lower() for n in list(BotSelfConfig.nickname) + [chat.preset_key]))) or \
-                (config.REPLY_ON_AT and is_tome and '全体成员' not in trigger_text.lower())
-            ):
+            has_name_mention = any(n.lower() in trigger_text.lower() for n in list(BotSelfConfig.nickname) + [chat.preset_key])
+            name_mention_reply = random.random() < config.REPLY_ON_NAME_MENTION_PROBABILITY and has_name_mention
+            at_reply = config.REPLY_ON_AT and is_tome and '全体成员' not in trigger_text.lower()
+            should_reply = wake_up or name_mention_reply or at_reply
+            reply_reasons: List[str] = []
+            if wake_up:
+                reply_reasons.append("wake")
+            if name_mention_reply:
+                reply_reasons.append("name")
+            if at_reply:
+                reply_reasons.append("at")
+
+            if should_reply:    # 如果不是 bot 相关的信息，则直接返回
                 await chat.update_chat_history_row(sender=sender_name,
                                             msg=f"@{chat.preset_key} {trigger_text}" if is_tome and chat_type=='group' else trigger_text,
-                                            require_summary=False, record_time=True, images=image_urls)
-                logger.info("符合 bot 发言条件，进行回复...")
+                                            require_summary=False, record_time=True, images=image_urls,
+                                            record_for_prompt=True,
+                                            content_is_labeled=content_is_labeled)
+                if chat_key in _chat_active_inputs:
+                    _chat_active_inputs[chat_key]["recorded"] = True
             else:
-                if config.CHAT_ENABLE_RECORD_ORTHER:
+                if config.CHAT_ENABLE_RECORD_ORTHER or image_urls:
                     await chat.update_chat_history_row(sender=sender_name, msg=trigger_text, require_summary=False, record_time=False, images=image_urls)
-                    if config.DEBUG_LEVEL > 1: logger.info("不是 bot 相关的信息，记录但不进行回复")
+                    if config.DEBUG_LEVEL > 1:
+                        record_reason = "记录图片上下文" if image_urls and not config.CHAT_ENABLE_RECORD_ORTHER else "记录但不进行回复"
+                        logger.info(f"不是 bot 相关的信息，{record_reason}")
                 else:
                     if config.DEBUG_LEVEL > 1: logger.info("不是 bot 相关的信息，不进行回复")
                 return
@@ -414,8 +521,14 @@ async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, ma
             # 生成对话 prompt 模板
             prompt_template = chat.get_chat_prompt_template(userid=trigger_userid, chat_type=chat_type)
             tg = TextGenerator.instance
-            req_tokens = tg.cal_token_count(str(prompt_template))
-            logger.info(f"生成 prompt 完成，请求 token 数: {req_tokens}")
+            text_tokens, prompt_image_count = _count_prompt_text_and_images(prompt_template, tg)
+            logger.info(
+                f"触发回复并生成 prompt | 会话: {chat_key} | 预设: {chat.preset_key} | "
+                f"触发原因: {','.join(reply_reasons) or 'unknown'} | "
+                f"输入预算: 文字 {text_tokens} tokens + 图片 {prompt_image_count} 张 | "
+                f"输入上限: {config.REQ_MAX_TOKENS} | 回复上限: {config.REPLY_MAX_TOKENS} | "
+                f"图片视野: 最近 {config.MULTIMODAL_HISTORY_LENGTH} 条 / 最多 {config.MULTIMODAL_MAX_MESSAGES_WITH_IMAGES} 条图片消息"
+            )
             log_prompt_template = '\n'.join([f"[{m['role']}]\n{m['content']}\n" for m in prompt_template]) if isinstance(prompt_template, list) else prompt_template
             if config.DEBUG_LEVEL > 0:
                 with open(os.path.join(config.NG_LOG_PATH, f"{chat_key}.{time.strftime('%Y-%m-%d %H-%M-%S')}.prompt.log"), 'a', encoding='utf-8') as f:
@@ -468,6 +581,23 @@ async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, ma
                 on_reasoning=on_reasoning_chunk,
             )  # 生成对话结果
 
+            if not success and _is_bad_request_error(raw_res) and _prompt_contains_images(prompt_template):
+                logger.warning("含图片上下文请求返回 400，临时回退到无图片上下文重试...")
+                chat.cleanup_after_bad_request(keep_history=5)
+                PersistentDataManager.instance.save_to_file(must_save=True)
+                raw_parts.clear()
+                stream_buffer = ""
+                sent_segments = 0
+                prompt_template = chat.get_chat_prompt_template(userid=trigger_userid, chat_type=chat_type, include_images=False)
+                raw_res, success = await tg.stream_response(
+                    prompt=prompt_template,
+                    type='chat',
+                    custom={'bot_name': chat.preset_key, 'sender_name': sender_name},
+                    plugin_config=config,
+                    on_text=on_text_chunk,
+                    on_reasoning=on_reasoning_chunk,
+                )
+
             # 工具产生的图片（如pixiv搜图）始终发送，不受后续错误影响
             for tool_output in tg.consume_tool_outputs():
                 if tool_output.get("type") == "image" and tool_output.get("url"):
@@ -507,11 +637,24 @@ async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, ma
 
             if not success:
                 logger.warning("生成对话结果失败，跳过处理...")
-                # 如果是 token 超限错误，清理历史防止持续失败
-                if raw_res and ("400" in raw_res or "Bad Request" in raw_res or "token" in raw_res.lower()):
-                    logger.warning("检测到 token 超限错误，清理对话历史...")
-                    chat._chat_data.chat_history = chat._chat_data.chat_history[-5:]  # 只保留最后 5 条
+                if _is_bad_request_error(raw_res):
+                    if _is_probably_image_bad_request(raw_res):
+                        logger.warning("检测到图片上下文相关 400，清理图片上下文和近期历史...")
+                        chat.cleanup_after_bad_request(keep_history=5)
+                        PersistentDataManager.instance.save_to_file(must_save=True)
+                        await matcher.send("[系统] 图片上下文可能已过期，已清理图片记录，请重新发送需要我看的图片")
+                        return
+                    logger.warning("检测到 400 Bad Request，清理图片上下文和近期历史...")
+                    chat.cleanup_after_bad_request(keep_history=5)
+                    PersistentDataManager.instance.save_to_file(must_save=True)
+                    await matcher.send("[系统] 请求上下文异常，已清理近期上下文，请继续对话")
+                    return
+                if raw_res and "token" in raw_res.lower():
+                    logger.warning("检测到 token 超限错误，清理近期历史...")
+                    chat.cleanup_after_bad_request(keep_history=5)
+                    PersistentDataManager.instance.save_to_file(must_save=True)
                     await matcher.send("[系统] 对话历史过长已自动清理，请继续对话")
+                    return
                 if not raw_parts and raw_res:
                     await send_segment(raw_res)
                 return
@@ -539,5 +682,7 @@ async def do_msg_response(trigger_userid:str, trigger_text:str, is_tome:bool, ma
             if config.DEBUG_LEVEL > 0: logger.info(f"对话响应完成 | 耗时: {time.time() - sta_time}s")
             return
         finally:
-            _chat_running_tasks.pop(chat_key, None)
+            if _chat_running_tasks.get(chat_key) is asyncio.current_task():
+                _chat_running_tasks.pop(chat_key, None)
+                _chat_active_inputs.pop(chat_key, None)
 

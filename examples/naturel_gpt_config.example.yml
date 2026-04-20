@@ -1,15 +1,14 @@
-# NoneBot 全局配置
+# NoneBot global config
 ng_config_path: config/naturel_gpt_config.yml
 ng_dev_mode: false
 
-# ============ LLM 配置 ============
+# ============ LLM ============
 OPENAI_API_KEYS:
   - sk-your-api-key-here
 OPENAI_BASE_URL: https://api.openai.com/v1
 OPENAI_PROXY_SERVER: ''
 OPENAI_TIMEOUT: 60
 
-# 聊天模型 / 摘要模型（摘要用小模型节省 token）
 CHAT_MODEL: gpt-4o
 CHAT_MODEL_MINI: gpt-4o-mini
 CHAT_TEMPERATURE: 0.4
@@ -17,85 +16,67 @@ CHAT_TOP_P: 0.95
 CHAT_PRESENCE_PENALTY: 0.0
 CHAT_FREQUENCY_PENALTY: 0.3
 
-# token 限制
+# Input prompt budget and reply cap
+REQ_MAX_TOKENS: 32000
 REPLY_MAX_TOKENS: 1024
 CHAT_MAX_SUMMARY_TOKENS: 512
-REQ_MAX_TOKENS: 32000
-CHAT_HISTORY_MAX_TOKENS: 2000
 
-# 流式响应
 LLM_ENABLE_STREAM: true
 LLM_SHOW_REASONING: false
-
-# 工具调用
 LLM_ENABLE_TOOLS: true
 LLM_MAX_TOOL_ROUNDS: 3
 
-# ============ 回复行为 ============
+# ============ Reply behavior ============
 REPLY_THROTTLE_TIME: 1
 REPLY_ON_NAME_MENTION_PROBABILITY: 0.1
 REPLY_ON_AT: true
 REPLY_ON_WELCOME: true
 RANDOM_CHAT_PROBABILITY: 0.0
-
 WORD_FOR_WAKE_UP: []
 WORD_FOR_FORBIDDEN: []
 IGNORE_PREFIX: '#'
 
-# 分段发送
 NG_ENABLE_MSG_SPLIT: true
 REPLY_SEGMENT_INTERVAL: 1.0
 REPLY_MAX_SEGMENTS: 5
-NG_MAX_RESPONSE_PER_MSG: 5
 
-# ============ 人格与记忆 ============
+# ============ Personas and memory ============
 DEFAULT_PERSONA: ''
 PRESETS: {}
-
 MEMORY_ACTIVE: true
 MEMORY_MAX_LENGTH: 16
-MEMORY_ENHANCE_THRESHOLD: 0.6
-
 CHAT_ENABLE_RECORD_ORTHER: true
 CHAT_ENABLE_SUMMARY_CHAT: true
 CHAT_MEMORY_SHORT_LENGTH: 6
-CHAT_SUMMARY_INTERVAL: 16
-
+CHAT_MEMORY_MAX_LENGTH: 16
 USER_MEMORY_SUMMARY_THRESHOLD: 16
 
-# ============ 多模态 ============
+# ============ Multimodal images ============
 MULTIMODAL_ENABLE: true
 MULTIMODAL_HISTORY_LENGTH: 4
 MULTIMODAL_MAX_MESSAGES_WITH_IMAGES: 2
 
-# ============ 工具配置 ============
-# 博查搜索
+# ============ Tools ============
 BOCHA_API_KEY: ''
 BOCHA_API_BASE: https://api.bochaai.com/v1/web-search
 BOCHA_SEARCH_COUNT: 5
-
-# 网页抓取
 WEB_FETCH_TIMEOUT: 20
 WEB_FETCH_MAX_CHARS: 6000
-
-# Playwright 浏览器
 PLAYWRIGHT_TIMEOUT: 20
-
-# Pixiv 搜图（Lolicon API）
 LLM_TOOL_LOLICON_CONFIG:
   proxy: null
   r18: 0
   pic_proxy: null
   exclude_ai: true
 
-# ============ 内容与显示 ============
+# ============ Content and display ============
 UNLOCK_CONTENT_LIMIT: false
 GROUP_CARD: true
 ENABLE_COMMAND_TO_IMG: true
 ENABLE_MSG_TO_IMG: false
 IMG_MAX_WIDTH: 1200
 
-# ============ 权限与匹配 ============
+# ============ Permission and matching ============
 ADMIN_USERID: []
 FORBIDDEN_USERS: []
 FORBIDDEN_GROUPS: []
@@ -105,7 +86,7 @@ NG_TO_ME: false
 NG_ENABLE_AWAKE_IDENTITIES: false
 NG_CHECK_USER_NAME_HYPHEN: false
 
-# ============ Minecraft 集成（可选）============
+# ============ Minecraft integration ============
 ENABLE_MC_CONNECT: false
 MC_COMMAND_PREFIX:
   - '!'
@@ -114,7 +95,7 @@ MC_RCON_HOST: 127.0.0.1
 MC_RCON_PORT: 25575
 MC_RCON_PASSWORD: ''
 
-# ============ 数据与调试 ============
+# ============ Data and debug ============
 NG_DATA_PICKLE: false
 NG_DATA_PATH: ./data/naturel_gpt/
 NG_LOG_PATH: ./data/naturel_gpt/logs/

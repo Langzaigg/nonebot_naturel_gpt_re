@@ -1,4 +1,4 @@
-﻿from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple
 from .singleton import Singleton
 from .chat import Chat
 from .persistent_data_manager import PersistentDataManager
@@ -131,8 +131,3 @@ class ChatManager(Singleton["ChatManager"]):
             else:
                 fail_cnt += 1
         return (success_cnt, fail_cnt)
-    
-    def clear_all_chat_summary(self):
-        """清除所有的聊天摘要"""
-        for chat in self._chat_dict.values():
-            chat.chat_data.chat_summarized = ''

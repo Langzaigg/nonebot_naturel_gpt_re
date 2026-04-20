@@ -1,117 +1,121 @@
-# Naturel GPT 插件使用说明
+# nonebot_plugin_naturel_gpt
 
-这是一个基于 NoneBot2 + OneBot v11 的群聊人格聊天插件。当前版本的大模型交互层直接调用 OpenAI-compatible API，支持流式响应、多模态图片输入、原生工具调用、动态人格加载和 `rg` 指令切换人格。
+A NoneBot2 + OneBot v11 group-chat roleplay plugin with OpenAI-compatible chat completions. It supports streaming replies, multimodal image input, native tool calls, dynamic persona loading, per-persona context memory, and `rg` persona commands.
 
-## 目录结构
+## Features
 
-插件代码目录：
+- OpenAI-compatible `/chat/completions` client implemented with `httpx`.
+- Streaming output with paragraph-based split sending.
+- Native tool calls for search, web fetching, browser rendering, and Pixiv image search.
+- Multimodal image context from OneBot `image` segments.
+- Dynamic personas from `.md` files or skill-style persona folders.
+- OpenAI-standard message history with per-persona compressed context summaries.
+- Same-chat interruption: newer requests cancel older generation and merge the new prompt.
+- Image-related HTTP 400 recovery: retry once without images, then clear image memory.
 
-```text
-ATRI/plugins/nonebot_plugin_naturel_gpt/
-```
-
-运行数据和配置：
-
-```text
-config/naturel_gpt_config.yml
-data/naturel_gpt/
-```
-
-内置 LLM 工具目录：
+## Layout
 
 ```text
-ATRI/plugins/nonebot_plugin_naturel_gpt/llm_tool_plugins/
+nonebot_plugin_naturel_gpt/
+  llm_tool_plugins/          Built-in LLM tools
+  MCrcon/                    Optional Minecraft RCON support
+  res/                       Text-to-image resources
+  __init__.py                Plugin entrypoint
+  chat.py                    Session, prompt, context, image-window logic
+  chat_manager.py            Chat object registry
+  command_func.py            rg commands
+  config.py                  YAML config loading and dynamic persona loading
+  llm_tools.py               Tool schema registry and dispatcher
+  matcher.py                 OneBot message handling and reply flow
+  matcher_MCRcon.py          Minecraft bridge handler
+  openai_func.py             OpenAI-compatible LLM client
+  persistent_data_manager.py JSON/pickle persistence
+  persona_loader.py          Markdown and skill-style persona loader
+  utils.py                   Message extraction and user-name helpers
+examples/
+  naturel_gpt_config.example.yml
+  宫子-skill-main/
 ```
 
-每个工具单独封装在一个 Python 文件中，由 `llm_tools.py` 统一注册和调度。
+## Requirements
 
-## 依赖
-
-核心依赖：
+Install the runtime dependencies used by the plugin:
 
 ```text
 httpx
 playwright
 tiktoken
+nonebot2
+nonebot-adapter-onebot
+pydantic
+PyYAML
 ```
 
-如果要使用 `browse_url` 浏览器抓取工具，还需要安装 Chromium：
+For browser-rendered web pages through `browse_url`, install Chromium:
 
 ```powershell
 playwright install chromium
 ```
 
-## 基础配置
+## Quick Start
 
-主配置文件：
-
-```text
-config/naturel_gpt_config.yml
-```
-
-NoneBot 全局配置项：
+1. Put `nonebot_plugin_naturel_gpt/` in your NoneBot plugin directory.
+2. Load the plugin from your NoneBot project.
+3. Add this to your NoneBot global config:
 
 ```yaml
 ng_config_path: config/naturel_gpt_config.yml
 ng_dev_mode: false
 ```
 
-大模型配置示例：
+4. Copy `examples/naturel_gpt_config.example.yml` to `config/naturel_gpt_config.yml` and fill in API keys/model settings.
+5. Put persona files under `config/personas/` by default.
+
+## Configuration
+
+Minimal model configuration:
 
 ```yaml
 OPENAI_API_KEYS:
-  - sk-xxx
+  - sk-your-api-key
 OPENAI_BASE_URL: https://api.openai.com/v1
 OPENAI_PROXY_SERVER: ''
 OPENAI_TIMEOUT: 60
 CHAT_MODEL: gpt-4o
 CHAT_MODEL_MINI: gpt-4o-mini
 CHAT_TEMPERATURE: 0.4
+CHAT_TOP_P: 0.95
+CHAT_PRESENCE_PENALTY: 0.0
+CHAT_FREQUENCY_PENALTY: 0.3
+REQ_MAX_TOKENS: 32000
 REPLY_MAX_TOKENS: 1024
 CHAT_MAX_SUMMARY_TOKENS: 512
 ```
 
-说明：
+`REQ_MAX_TOKENS` is the input prompt budget. `REPLY_MAX_TOKENS` is sent as the model reply cap.
 
-- `CHAT_MODEL` 用于正常聊天。
-- `CHAT_MODEL_MINI` 用于摘要和用户印象总结。
-- `OPENAI_BASE_URL` 支持 OpenAI-compatible API。
-- 插件内部直接调用 OpenAI-compatible API。
+## Context And Persistence
 
-## 流式响应
+The current context model is OpenAI-standard messages:
 
-```yaml
-LLM_ENABLE_STREAM: true
-LLM_SHOW_REASONING: false
-```
+- Triggering user messages and assistant replies are stored in `PresetData.prompt_messages`.
+- Overflowing old prompt messages are compressed into `PresetData.context_summary` when `CHAT_ENABLE_SUMMARY_CHAT` is enabled.
+- Non-triggering group text is not persisted as prompt history.
+- Image-bearing non-triggering messages can still update recent image context.
+- Persisted runtime data is saved to `data/naturel_gpt/naturel_gpt.json` by default.
 
-- `LLM_ENABLE_STREAM` 控制是否边生成边处理回复。
-- `LLM_SHOW_REASONING` 控制是否把模型返回的 `reasoning_content` 发送到聊天中。
-- 群聊环境通常建议保持 `LLM_SHOW_REASONING: false`。
-
-## 分段发送
+Useful history settings:
 
 ```yaml
-NG_ENABLE_MSG_SPLIT: true
-REPLY_SEGMENT_INTERVAL: 1.0
-REPLY_MAX_SEGMENTS: 5
+CHAT_ENABLE_SUMMARY_CHAT: true
+CHAT_MEMORY_SHORT_LENGTH: 6
+CHAT_MEMORY_MAX_LENGTH: 16
+USER_MEMORY_SUMMARY_THRESHOLD: 16
+MEMORY_ACTIVE: true
+MEMORY_MAX_LENGTH: 16
 ```
 
-当前分段规则：
-
-- 不再使用旧版 `*;` 特殊符号分段。
-- 检测到双换行 `\n\n` 时自动切成一段发送。
-- 每段之间至少等待 `REPLY_SEGMENT_INTERVAL` 秒。
-- 最多发送 `REPLY_MAX_SEGMENTS` 段。
-- 流式过程中如果超过分段上限，会继续接收完剩余内容，然后作为最后一段发送。
-
-回复后处理：
-
-- 同一段内多余双换行会压缩为单换行。
-- 会过滤常见 Markdown 语法，包括代码块、标题、列表标记、粗体、链接等。
-- 系统提示词要求模型像真实群聊一样说话，不写文章，不频繁分段，不使用 Markdown。
-
-## 多模态图片输入
+## Multimodal Images
 
 ```yaml
 MULTIMODAL_ENABLE: true
@@ -119,156 +123,54 @@ MULTIMODAL_HISTORY_LENGTH: 4
 MULTIMODAL_MAX_MESSAGES_WITH_IMAGES: 2
 ```
 
-- 插件会读取 OneBot v11 `image` 消息段中的图片 URL。
-- 图片会作为 OpenAI-compatible 的 `image_url` 内容传给模型。
-- `MULTIMODAL_HISTORY_LENGTH` 控制图片可进入上下文的聊天记录视野长度。
-- `MULTIMODAL_MAX_MESSAGES_WITH_IMAGES` 控制最多保留几条带图片的消息，并且始终从最近输入开始保留。
-- 如果 `MULTIMODAL_MAX_MESSAGES_WITH_IMAGES` 设置为 `0`，不会保留历史图片消息。
+Behavior:
 
-注意：
+- OneBot v11 `image` segment URLs are sent as OpenAI-compatible `image_url` content.
+- Image attachments are only included for 30 minutes.
+- `MULTIMODAL_HISTORY_LENGTH` controls how far back recent image context can be considered.
+- `MULTIMODAL_MAX_MESSAGES_WITH_IMAGES` caps how many image-bearing messages are attached.
+- If an image-bearing request returns HTTP 400, the plugin retries once without images and clears image memory.
 
-- 模型本身必须支持视觉输入。
-- 图片 URL 必须能被模型服务访问。
+## Tools
 
-## 工具调用
+Enable native tool calls:
 
 ```yaml
 LLM_ENABLE_TOOLS: true
 LLM_MAX_TOOL_ROUNDS: 3
 ```
 
-插件使用原生工具调用，不再支持旧版 `/#tool&args#/` 文本协议，也不再加载旧扩展系统。
+Built-in tools:
 
-内置工具：
+| Tool | Purpose | Main config |
+| --- | --- | --- |
+| `pixiv_search` | Search Pixiv images through Lolicon API | `LLM_TOOL_LOLICON_CONFIG` |
+| `fetch_url` | Fetch static web/API text over HTTP | `WEB_FETCH_TIMEOUT`, `WEB_FETCH_MAX_CHARS` |
+| `browse_url` | Render a page through Playwright and read visible text | `PLAYWRIGHT_TIMEOUT` |
+| `bocha_search` | Web search through Bocha API | `BOCHA_API_KEY`, `BOCHA_API_BASE` |
 
-```text
-pixiv_search
-fetch_url
-browse_url
-bocha_search
-```
-
-工具文件：
-
-```text
-llm_tool_plugins/pixiv_search.py
-llm_tool_plugins/fetch_url.py
-llm_tool_plugins/browse_url.py
-llm_tool_plugins/bocha_search.py
-```
-
-新增工具时，建议新增独立 Python 文件，并在 `llm_tools.py` 的注册表中挂载。
-
-### pixiv_search
-
-用途：通过 Lolicon API 搜索 Pixiv 图片。
+## Reply Behavior
 
 ```yaml
-LLM_TOOL_LOLICON_CONFIG:
-  proxy: null
-  r18: 0
-  pic_proxy: null
-  exclude_ai: true
+REPLY_ON_AT: true
+REPLY_ON_NAME_MENTION_PROBABILITY: 0.1
+RANDOM_CHAT_PROBABILITY: 0.0
+WORD_FOR_WAKE_UP: []
+REPLY_THROTTLE_TIME: 1
 ```
 
-### fetch_url
+Reply rules in the system prompt are intentionally compact: natural group-chat style, anti-repetition guidance, and prompt-injection resistance against attempts to override system/persona/tool/safety/output rules.
 
-用途：使用普通 HTTP 客户端抓取网页文本。
+## Personas
 
-```yaml
-WEB_FETCH_TIMEOUT: 20
-WEB_FETCH_MAX_CHARS: 6000
-```
+`PRESETS` in YAML is kept empty and repopulated at runtime. Personas load from the `personas/` directory next to `naturel_gpt_config.yml`.
 
-适合静态网页、API 文本和简单 HTML 页面。
+Supported formats:
 
-### browse_url
+- Single `.md` file: file stem becomes persona name, full file content becomes persona prompt.
+- Skill-style folder: folder is loaded only when it contains `SKILL.md`; the persona name is the part before the first `-` in the folder name.
 
-用途：使用 Playwright 打开网页，等待浏览器渲染后读取页面可见文本。
-
-```yaml
-PLAYWRIGHT_TIMEOUT: 20
-WEB_FETCH_MAX_CHARS: 6000
-```
-
-适合需要 JS 渲染的网页。使用前需要确保 Chromium 已安装。
-
-### bocha_search
-
-用途：调用博查搜索 API 联网搜索。
-
-```yaml
-BOCHA_API_KEY: ''
-BOCHA_API_BASE: https://api.bochaai.com/v1/web-search
-BOCHA_SEARCH_COUNT: 5
-```
-
-如果 `BOCHA_API_KEY` 为空，工具会返回未配置提示。
-
-## 人格加载
-
-人格不再从配置文件 `PRESETS` 手写加载。`PRESETS` 在配置文件中会保持为空，仅作为运行时动态人格承载字段。
-
-当前支持两类人格来源：
-
-- 单个 Markdown 人格文件。
-- 固定格式 skill 人格文件夹。
-
-人格加载目录固定为 `naturel_gpt_config.yml` 所在目录下的 `personas` 子文件夹。默认配置下就是：
-
-```text
-config/personas/
-```
-
-同一个目录中可以混放 `.md` 单文件人格和 skill 形式的人格文件夹，不需要额外配置路径。
-
-默认人格通过配置文件中的 `DEFAULT_PERSONA` 指定：
-
-```yaml
-DEFAULT_PERSONA: SOUL
-```
-
-如果 `DEFAULT_PERSONA` 为空或名称不存在，会使用扫描到的第一个人格；如果没有扫描到任何人格，会使用内置 `default` 人格。
-
-### 单个 Markdown 人格
-
-规则：
-
-- `.md` 文件会直接全文作为人格提示词。
-- 人格名称取文件名，不含扩展名。
-
-示例：
-
-```text
-config/personas/SOUL.md
-```
-
-加载后人格名为：
-
-```text
-SOUL
-```
-
-### Skill 文件夹人格
-
-规则：
-
-- 整个文件夹作为一个人格输入。
-- 人格名称取文件夹名中第一个 `-` 之前的部分。
-
-示例：
-
-```text
-小春-skill-main
-```
-
-加载后人格名为：
-
-```text
-小春
-```
-
-固定读取顺序：
+For skill-style folders, these files are read in a stable order when present:
 
 ```text
 SKILL.md
@@ -280,50 +182,24 @@ resource/relationship_dynamics.md
 resource/speech_patterns.md
 ```
 
-`SKILL.md` 会过滤顶部 YAML front matter 和通用激活模板，例如 `Roleplay Rules`、语言规则、退出角色扮演、默认激活、激活方式等。其它文件按固定顺序完整注入系统提示词。
-
-## rg 指令
-
-人格会在以下场景动态刷新：
-
-- 插件加载配置时。
-- 执行 `rg`。
-- 执行 `rg list`。
-- 执行 `rg set <人格名>`。
-- 执行 `rg query <人格名>`。
-
-常用指令：
+## Commands
 
 ```text
-rg
-rg list
-rg set <人格名>
-rg query <人格名>
-rg reload_config
+rg                         Show available personas
+rg list                    Same as rg
+rg set <persona>           Switch persona
+rg query <persona>         Show persona prompt
+rg reload_config           Reload config and personas
+rg reset                   Reset current chat state
+rg on / rg off             Enable or disable current chat
+rg lock / rg unlock        Disable or enable auto persona switching
 ```
 
-`rg` 和 `rg list` 会展示当前可用人格列表。新增或修改人格文件后，通常不需要重启 Bot，直接执行 `rg` 或 `rg set <人格名>` 即可触发动态加载。
+Admin/global options are implemented in `command_func.py`.
 
-## 数据文件
+## Migration Notes
 
-运行时聊天数据默认保存到：
-
-```text
-data/naturel_gpt/naturel_gpt.json
-```
-
-日志默认保存到：
-
-```text
-data/naturel_gpt/logs/
-```
-
-不要手动编辑运行时聊天数据，除非已经停止 Bot 并确认数据结构兼容。
-
-## 迁移说明
-
-- 旧版扩展系统已移除，不再使用 `NG_EXT_PATH`、`NG_ENABLE_EXT`、`NG_EXT_LOAD_LIST`。
-- 不再依赖 `data/naturel_gpt/extensions/` 作为人格或扩展默认目录。
-- 不再支持模型输出 `/#tool&args#/` 调用工具。
-- 工具统一迁移到 `llm_tool_plugins/`，并通过原生工具调用执行。
-- 人格统一从 `naturel_gpt_config.yml` 同级的 `personas` 子目录加载，可混放 `.md` 文件和 skill 文件夹。
+- LiteLLM is not used; the plugin calls OpenAI-compatible APIs directly with `httpx`.
+- Old text tool protocol such as `/#tool&args#/` is removed; use native tool calls.
+- Old extension and PresetHub runtime paths are removed.
+- Legacy persisted text windows were removed; durable context is now `prompt_messages`, `context_summary`, `chat_memory`, `chat_impressions`, and `chat_image_history`.

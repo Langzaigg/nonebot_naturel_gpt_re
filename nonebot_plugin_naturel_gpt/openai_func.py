@@ -60,6 +60,10 @@ class TextGenerator(Singleton["TextGenerator"]):
             "timeout": self.config.get("timeout", 30),
             "stream": stream,
         }
+        for optional_key in ("top_p", "frequency_penalty", "presence_penalty"):
+            value = self.config.get(optional_key)
+            if value is not None:
+                kwargs[optional_key] = value
         if self.base_url:
             kwargs["base_url"] = self.base_url
         if self.proxy:
@@ -111,6 +115,9 @@ class TextGenerator(Singleton["TextGenerator"]):
             body["temperature"] = kwargs["temperature"]
         if "max_tokens" in kwargs:
             body["max_tokens"] = kwargs["max_tokens"]
+        for optional_key in ("top_p", "frequency_penalty", "presence_penalty"):
+            if optional_key in kwargs:
+                body[optional_key] = kwargs[optional_key]
         if tools:
             body["tools"] = tools
             if tool_choice:
@@ -125,7 +132,9 @@ class TextGenerator(Singleton["TextGenerator"]):
 
         async with httpx.AsyncClient(**client_kwargs) as client:
             response = await client.post(url, headers=headers, json=body)
-            response.raise_for_status()
+            if response.status_code >= 400:
+                body_text = response.text[:1000]
+                raise RuntimeError(f"HTTP {response.status_code}: {body_text}")
             return response.json()
 
     async def _stream_iter_openai(self, kwargs: Dict[str, Any]):
@@ -156,6 +165,9 @@ class TextGenerator(Singleton["TextGenerator"]):
             body["temperature"] = kwargs["temperature"]
         if "max_tokens" in kwargs:
             body["max_tokens"] = kwargs["max_tokens"]
+        for optional_key in ("top_p", "frequency_penalty", "presence_penalty"):
+            if optional_key in kwargs:
+                body[optional_key] = kwargs[optional_key]
         if tools:
             body["tools"] = tools
             if tool_choice:
@@ -169,7 +181,9 @@ class TextGenerator(Singleton["TextGenerator"]):
 
         async with httpx.AsyncClient(**client_kwargs) as client:
             async with client.stream("POST", url, headers=headers, json=body) as response:
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    body_text = (await response.aread()).decode("utf-8", errors="replace")[:1000]
+                    raise RuntimeError(f"HTTP {response.status_code}: {body_text}")
                 async for line in response.aiter_lines():
                     line = line.strip()
                     if not line:
