@@ -23,16 +23,21 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
 
 def _message_to_dict(message: Any) -> Dict[str, Any]:
     if isinstance(message, dict):
-        return dict(message)
-    if hasattr(message, "model_dump"):
-        return message.model_dump(exclude_none=True)
-    if hasattr(message, "dict"):
-        return message.dict(exclude_none=True)
-    return {
-        "role": _get(message, "role", "assistant"),
-        "content": _get(message, "content", ""),
-        "tool_calls": _get(message, "tool_calls", None),
-    }
+        d = dict(message)
+    elif hasattr(message, "model_dump"):
+        d = message.model_dump(exclude_none=True)
+    elif hasattr(message, "dict"):
+        d = message.dict(exclude_none=True)
+    else:
+        d = {
+            "role": _get(message, "role", "assistant"),
+            "content": _get(message, "content", ""),
+            "tool_calls": _get(message, "tool_calls", None),
+        }
+    # 确保 content 不是 None；OpenAI API 要求 assistant 消息必须有 content
+    if d.get("content") is None:
+        d["content"] = ""
+    return d
 
 
 class TextGenerator(Singleton["TextGenerator"]):
@@ -43,6 +48,10 @@ class TextGenerator(Singleton["TextGenerator"]):
         self.proxy = proxy
         self.base_url = base_url
         self.last_tool_outputs: List[Dict[str, Any]] = []
+        self._tool_calling: bool = False  # 标记是否正在执行工具调用（受保护阶段）
+        self._on_tool_done: Optional[Callable[[], None]] = None  # 工具调用完成回调
+        self._current_chat_key: str = ""  # 当前会话的chat_key，供工具使用
+        self._current_trigger_userid: str = ""  # 当前触发用户的userid，供工具使用
 
     def _current_key(self) -> str:
         return self.api_keys[self.key_index % len(self.api_keys)]
@@ -207,9 +216,10 @@ class TextGenerator(Singleton["TextGenerator"]):
         tools: Optional[List[Dict[str, Any]]],
         on_text: Optional[ChunkCallback],
         on_reasoning: Optional[ChunkCallback],
-    ) -> Tuple[str, List[Dict[str, Any]]]:
+    ) -> Tuple[str, List[Dict[str, Any]], str]:
         kwargs = self._completion_kwargs(messages, type, True, tools)
         content_parts: List[str] = []
+        reasoning_parts: List[str] = []
         tool_call_chunks: Dict[int, Dict[str, Any]] = {}
 
         async for chunk in self._stream_iter_openai(kwargs):
@@ -219,8 +229,10 @@ class TextGenerator(Singleton["TextGenerator"]):
             delta = _get(choices[0], "delta", {})
 
             reasoning = _get(delta, "reasoning_content") or _get(delta, "reasoning") or ""
-            if reasoning and on_reasoning:
-                await on_reasoning(str(reasoning))
+            if reasoning:
+                reasoning_parts.append(str(reasoning))
+                if on_reasoning:
+                    await on_reasoning(str(reasoning))
 
             content = _get(delta, "content") or ""
             if content:
@@ -243,7 +255,11 @@ class TextGenerator(Singleton["TextGenerator"]):
                 if _get(function, "arguments"):
                     state["function"]["arguments"] += str(_get(function, "arguments"))
 
-        return "".join(content_parts), [v for _, v in sorted(tool_call_chunks.items()) if v["function"]["name"]]
+        return (
+            "".join(content_parts),
+            [v for _, v in sorted(tool_call_chunks.items()) if v["function"]["name"]],
+            "".join(reasoning_parts),
+        )
 
     async def _complete_once(self, messages: List[Dict[str, Any]], type: str, tools: Optional[List[Dict[str, Any]]]) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
         kwargs = self._completion_kwargs(messages, type, False, tools)
@@ -285,23 +301,46 @@ class TextGenerator(Singleton["TextGenerator"]):
         tool_schemas = get_tool_schemas(plugin_config) if plugin_config and type == "chat" else []
         max_rounds = getattr(plugin_config, "LLM_MAX_TOOL_ROUNDS", 0) if plugin_config else 0
 
-        for _ in range(max_rounds + 1):
+        for round_idx in range(max_rounds + 1):
             try:
+                # 最后一轮不带工具定义，强制模型直接回复
+                current_tools = None if round_idx >= max_rounds else tool_schemas
+                is_last_round = round_idx >= max_rounds
+                
                 if self.config.get("enable_stream", True):
-                    content, tool_calls = await self._stream_once(messages, type, tool_schemas, on_text, on_reasoning)
+                    content, tool_calls, reasoning_content = await self._stream_once(messages, type, current_tools, on_text, on_reasoning)
                     if not tool_calls:
                         return content.strip(), True
-                    messages.append({"role": "assistant", "content": content or None, "tool_calls": tool_calls})
+                    if is_last_round:
+                        return content.strip() if content else "工具调用已达上限，请基于已有结果回复。", True
+                    assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content or "", "tool_calls": tool_calls}
+                    if reasoning_content:
+                        assistant_msg["reasoning_content"] = reasoning_content
+                    messages.append(assistant_msg)
                 else:
-                    content, tool_calls, message_dict = await self._complete_once(messages, type, tool_schemas)
+                    content, tool_calls, message_dict = await self._complete_once(messages, type, current_tools)
                     if not tool_calls:
                         if on_text and content:
                             await on_text(content)
                         return content.strip(), True
+                    if is_last_round:
+                        if on_text and content:
+                            await on_text(content)
+                        return content.strip() if content else "工具调用已达上限，请基于已有结果回复。", True
                     messages.append(message_dict)
 
-                await self._execute_tool_calls(messages, tool_calls, plugin_config)
+                # 通知外部：工具调用阶段开始（受保护，不打断）
+                self._tool_calling = True
+                try:
+                    await self._execute_tool_calls(messages, tool_calls, plugin_config)
+                finally:
+                    self._tool_calling = False
+                    if self._on_tool_done:
+                        self._on_tool_done()
             except Exception as e:
+                self._tool_calling = False
+                if self._on_tool_done:
+                    self._on_tool_done()
                 logger.warning(f"LLM 请求失败: {e!r}")
                 self._rotate_key()
                 if len(self.api_keys) <= 1:
@@ -326,7 +365,8 @@ class TextGenerator(Singleton["TextGenerator"]):
         return f"{time_str}{sender}: {msg}"
 
     @staticmethod
-    def cal_token_count(text: str, model: str = "gpt-3.5-turbo"):
+    def _cal_text_tokens(text: str, model: str = "gpt-3.5-turbo") -> int:
+        """计算纯文本的token数"""
         try:
             if model in enc_cache:
                 enc = enc_cache[model]
@@ -336,3 +376,30 @@ class TextGenerator(Singleton["TextGenerator"]):
             return len(enc.encode(text))
         except Exception:
             return max(1, len(text) // 2)
+
+    @staticmethod
+    def _cal_messages_tokens(messages: List[Dict[str, Any]], model: str = "gpt-3.5-turbo") -> int:
+        """计算消息列表的token数，包括图片估算"""
+        total = 0
+        for msg in messages:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total += TextGenerator._cal_text_tokens(content, model)
+            elif isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get("type") == "text":
+                            total += TextGenerator._cal_text_tokens(item.get("text", ""), model)
+                        elif item.get("type") == "image_url":
+                            total += 85  # OpenAI vision图片token估算
+            total += 4  # 消息格式开销 (role, etc.)
+        return total
+
+    @staticmethod
+    def cal_token_count(text_or_messages: Any, model: str = "gpt-3.5-turbo") -> int:
+        """统一的token计算方法，支持字符串和消息列表"""
+        if isinstance(text_or_messages, str):
+            return TextGenerator._cal_text_tokens(text_or_messages, model)
+        elif isinstance(text_or_messages, list):
+            return TextGenerator._cal_messages_tokens(text_or_messages, model)
+        return 0

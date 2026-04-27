@@ -73,7 +73,8 @@ class PresetData(StoreSerializable):
     is_only_private: bool = field(default=False)
 
     chat_impressions: Dict[str, ImpressionData] = field(default_factory=dict)
-    chat_memory: Dict[str, str] = field(default_factory=dict)
+    chat_memory: Dict[str, str] = field(default_factory=dict)  # 群记忆
+    user_memories: Dict[str, Dict[str, str]] = field(default_factory=dict)  # 用户个人记忆: {user_id: {key: value}}
     context_summary: str = field(default="")
     prompt_messages: List[ChatMessageData] = field(default_factory=list)
 
@@ -98,6 +99,7 @@ class PresetData(StoreSerializable):
 
         self.chat_impressions.clear()
         self.chat_memory.clear()
+        self.user_memories.clear()
         self.context_summary = ""
         self.prompt_messages.clear()
 
@@ -110,6 +112,14 @@ class PresetData(StoreSerializable):
         self.is_default = bool(getattr(self, "is_default", False))
         self.is_only_private = bool(getattr(self, "is_only_private", False))
         self.chat_memory = dict(getattr(self, "chat_memory", {}) or {})
+        
+        # 加载用户个人记忆
+        raw_user_memories = getattr(self, "user_memories", {}) or {}
+        self.user_memories = {}
+        for uid, memories in raw_user_memories.items():
+            if isinstance(memories, dict):
+                self.user_memories[str(uid)] = {str(k): str(v) for k, v in memories.items() if v}
+        
         self.context_summary = str(getattr(self, "context_summary", "") or "")
 
         raw_impressions = getattr(self, "chat_impressions", {}) or {}

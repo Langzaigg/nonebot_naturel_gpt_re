@@ -1,14 +1,15 @@
-# NoneBot global config
+# NoneBot 全局配置
 ng_config_path: config/naturel_gpt_config.yml
 ng_dev_mode: false
 
-# ============ LLM ============
+# ============ LLM 配置 ============
 OPENAI_API_KEYS:
   - sk-your-api-key-here
 OPENAI_BASE_URL: https://api.openai.com/v1
 OPENAI_PROXY_SERVER: ''
-OPENAI_TIMEOUT: 60
+OPENAI_TIMEOUT: 180
 
+# 聊天模型 / 摘要模型（摘要用小模型节省 token）
 CHAT_MODEL: gpt-4o
 CHAT_MODEL_MINI: gpt-4o-mini
 CHAT_TEMPERATURE: 0.4
@@ -16,67 +17,88 @@ CHAT_TOP_P: 0.95
 CHAT_PRESENCE_PENALTY: 0.0
 CHAT_FREQUENCY_PENALTY: 0.3
 
-# Input prompt budget and reply cap
-REQ_MAX_TOKENS: 32000
+# token 限制
 REPLY_MAX_TOKENS: 1024
 CHAT_MAX_SUMMARY_TOKENS: 512
 
+# 上下文管理
+CONTEXT_TOKEN_BUDGET: 32768
+CONTEXT_WINDOW_SIZE: 20
+CONTEXT_SUMMARY_ENABLED: true
+
+# 流式响应
 LLM_ENABLE_STREAM: true
 LLM_SHOW_REASONING: false
-LLM_ENABLE_TOOLS: true
-LLM_MAX_TOOL_ROUNDS: 3
 
-# ============ Reply behavior ============
+# 工具调用
+LLM_ENABLE_TOOLS: true
+LLM_MAX_TOOL_ROUNDS: 7
+
+# ============ 回复行为 ============
 REPLY_THROTTLE_TIME: 1
 REPLY_ON_NAME_MENTION_PROBABILITY: 0.1
 REPLY_ON_AT: true
 REPLY_ON_WELCOME: true
 RANDOM_CHAT_PROBABILITY: 0.0
+
 WORD_FOR_WAKE_UP: []
 WORD_FOR_FORBIDDEN: []
 IGNORE_PREFIX: '#'
 
+# 分段发送
 NG_ENABLE_MSG_SPLIT: true
 REPLY_SEGMENT_INTERVAL: 1.0
 REPLY_MAX_SEGMENTS: 5
 
-# ============ Personas and memory ============
+# ============ 人格与记忆 ============
 DEFAULT_PERSONA: ''
 PRESETS: {}
+
+# 记忆功能
 MEMORY_ACTIVE: true
 MEMORY_MAX_LENGTH: 16
+
 CHAT_ENABLE_RECORD_ORTHER: true
-CHAT_ENABLE_SUMMARY_CHAT: true
-CHAT_MEMORY_SHORT_LENGTH: 6
-CHAT_MEMORY_MAX_LENGTH: 16
+
 USER_MEMORY_SUMMARY_THRESHOLD: 16
 
-# ============ Multimodal images ============
+# ============ 多模态 ============
 MULTIMODAL_ENABLE: true
-MULTIMODAL_HISTORY_LENGTH: 4
+MULTIMODAL_HISTORY_LENGTH: 5
 MULTIMODAL_MAX_MESSAGES_WITH_IMAGES: 2
+MULTIMODAL_IMAGE_FRESH_MINUTES: 30
 
-# ============ Tools ============
+# ============ 工具配置 ============
+# 博查搜索
 BOCHA_API_KEY: ''
 BOCHA_API_BASE: https://api.bochaai.com/v1/web-search
-BOCHA_SEARCH_COUNT: 5
+BOCHA_SEARCH_COUNT: 15
+
+# 网页抓取
 WEB_FETCH_TIMEOUT: 20
-WEB_FETCH_MAX_CHARS: 6000
+WEB_FETCH_MAX_CHARS: 8000
+
+# Playwright 浏览器
 PLAYWRIGHT_TIMEOUT: 20
+
+# Pixiv 搜图（Lolicon API）
 LLM_TOOL_LOLICON_CONFIG:
   proxy: null
   r18: 0
   pic_proxy: null
   exclude_ai: true
 
-# ============ Content and display ============
+# ComfyUI 画图
+COMFYUI_BASE_URL: http://127.0.0.1:8188
+
+# ============ 内容与显示 ============
 UNLOCK_CONTENT_LIMIT: false
 GROUP_CARD: true
 ENABLE_COMMAND_TO_IMG: true
 ENABLE_MSG_TO_IMG: false
-IMG_MAX_WIDTH: 1200
+IMG_MAX_WIDTH: 800
 
-# ============ Permission and matching ============
+# ============ 权限与匹配 ============
 ADMIN_USERID: []
 FORBIDDEN_USERS: []
 FORBIDDEN_GROUPS: []
@@ -86,7 +108,7 @@ NG_TO_ME: false
 NG_ENABLE_AWAKE_IDENTITIES: false
 NG_CHECK_USER_NAME_HYPHEN: false
 
-# ============ Minecraft integration ============
+# ============ Minecraft 集成（可选）============
 ENABLE_MC_CONNECT: false
 MC_COMMAND_PREFIX:
   - '!'
@@ -95,7 +117,7 @@ MC_RCON_HOST: 127.0.0.1
 MC_RCON_PORT: 25575
 MC_RCON_PASSWORD: ''
 
-# ============ Data and debug ============
+# ============ 数据与调试 ============
 NG_DATA_PICKLE: false
 NG_DATA_PATH: ./data/naturel_gpt/
 NG_LOG_PATH: ./data/naturel_gpt/logs/

@@ -1,4 +1,5 @@
-﻿import copy
+import asyncio
+import copy
 import time
 import random
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -116,7 +117,7 @@ class Chat:
             self._trim_prompt_messages_without_summary(preset)
 
     async def update_chat_history_row_for_user(self, sender:str, msg: str, userid:str, username:str, require_summary:bool = False) -> None:
-        """更新对特定用户的对话历史行"""
+        """更新对特定用户的对话历史行，使用智能淘汰策略"""
         if userid not in self.chat_preset.chat_impressions:
             impression_data = ImpressionData(user_id=userid)
             self.chat_preset.chat_impressions[userid] = impression_data
@@ -128,32 +129,39 @@ class Chat:
         if config.DEBUG_LEVEL > 0: logger.info(f"添加对话历史行: {messageunit}  |  当前对话历史行数: {len(impression_data.chat_history)}")
         # 保证对话历史不超过最大长度
         if len(impression_data.chat_history) > config.USER_MEMORY_SUMMARY_THRESHOLD and require_summary:
-            _times = 0
-            while len(impression_data.chat_history) > 1000 and _times < 100:
-                # 随机删除一些对话历史行
-                impression_data.chat_history.pop(random.randint(0, len(impression_data.chat_history) - 1))
-                _times += 1
+            # 保留最近的对话和包含关键词的重要历史
+            keep_recent = min(10, len(impression_data.chat_history) // 2)
+            recent_history = impression_data.chat_history[-keep_recent:]
+            
+            # 智能筛选：保留包含bot名、@、重要关键词的消息
+            important_keywords = {self._preset_key, "重要", "记住", "忘记"}
+            important_old = [
+                h for h in impression_data.chat_history[:-keep_recent]
+                if any(kw.lower() in h.lower() for kw in important_keywords)
+            ][-5:]  # 最多保留5条重要旧消息
+            
+            # 合并用于摘要的历史
+            history_for_summary = important_old + recent_history
+            
             prev_summarized = f"上次印象：{impression_data.chat_impression}\n\n"
-            history_str = '\n'.join(impression_data.chat_history)
+            history_str = '\n'.join(history_for_summary)
             prompt = (   # 以机器人的视角总结对话
                 f"{prev_summarized}[对话]\n"
                 f"{history_str}"
                 f"\n\n{self.chat_preset.bot_self_introl}\n请以{self.chat_preset.preset_key}的视角简要更新对{username}的印象，只需在200字内输出新的印象"
             )
-            # if config.DEBUG_LEVEL > 0: logger.info(f"生成对话历史摘要prompt: {prompt}")
             res, success = await tg.get_response(prompt, type='summarize')  # 生成新的对话历史摘要
             if success:
                 impression_data.chat_impression = res.strip()
             else:
                 logger.error(f"生成对话印象摘要失败: {res}")
-                return
             logger.info(f"生成对话印象摘要: {self.chat_preset.chat_impressions[userid]}")
             if config.DEBUG_LEVEL > 0: logger.info(f"印象生成消耗token数: {tg.cal_token_count(prompt + impression_data.chat_impression)}")
-            # impression_data.chat_history = impression_data.chat_history[-config.CHAT_MEMORY_SHORT_LENGTH:]
-            impression_data.chat_history = []   # 直接清空对话历史
+            # 保留最近的历史，而非清空
+            impression_data.chat_history = recent_history
 
     def set_memory(self, mem_key:str, mem_value:str = '') -> None:
-        """为当前预设设置记忆"""
+        """为当前预设设置记忆，支持智能淘汰"""
         if not mem_key:
             return
         mem_key = mem_key.replace(' ', '_')  # 将空格替换为下划线
@@ -170,10 +178,23 @@ class Chat:
             self.chat_preset.chat_memory[mem_key] = mem_value
             if config.DEBUG_LEVEL > 0: logger.info(f"记住了: {mem_key} -> {mem_value}")
 
+            # 智能淘汰：当超出最大长度时，优先删除非关键记忆
             if len(self.chat_preset.chat_memory) > config.MEMORY_MAX_LENGTH:
-                del_key = list(self.chat_preset.chat_memory.keys())[0]
-                del self.chat_preset.chat_memory[del_key]
-                if config.DEBUG_LEVEL > 0: logger.info(f"忘记了: {del_key} (超出最大记忆长度)")
+                # 优先保留包含重要关键词的记忆
+                important_keywords = {"重要", "关键", "记住", "名字", "身份", "偏好"}
+                memory_items = list(self.chat_preset.chat_memory.items())
+                
+                # 找到第一个非重要的记忆删除
+                for del_key, del_value in memory_items:
+                    if not any(kw in del_value for kw in important_keywords):
+                        del self.chat_preset.chat_memory[del_key]
+                        if config.DEBUG_LEVEL > 0: logger.info(f"忘记了: {del_key} (智能淘汰，超出最大记忆长度)")
+                        break
+                else:
+                    # 如果都是重要记忆，则删除最早的
+                    del_key = memory_items[0][0]
+                    del self.chat_preset.chat_memory[del_key]
+                    if config.DEBUG_LEVEL > 0: logger.info(f"忘记了: {del_key} (超出最大记忆长度)")
 
     def get_chat_prompt_template(self, userid:str, chat_type:str = '', include_images: bool = True)-> List[Dict[str, Any]]:
         """对话 prompt 模板生成"""
@@ -181,27 +202,38 @@ class Chat:
         impression_text = f"[impression]\n{self.chat_preset.chat_impressions[userid].chat_impression}\n\n" \
             if userid in self.chat_preset.chat_impressions else ''  # 用户印象描述
 
-        # 记忆模块
-        memory_text = ''
-        memory = ''
-        self.chat_preset.chat_memory = {k: v for k, v in self.chat_preset.chat_memory.items() if v} # 删除空记忆 TODO 怎么出现的空记忆？
-        # 如果有记忆，则生成记忆模板
-        idx = 0 # 记忆序号
+        # 记忆模块 - 群记忆
+        group_memory_text = ''
+        group_memory = ''
+        self.chat_preset.chat_memory = {k: v for k, v in self.chat_preset.chat_memory.items() if v}
+        idx = 0
         for k, v in self.chat_preset.chat_memory.items():
             idx += 1
-            memory_text += f"{idx}. {k}: {v}\n"
+            group_memory_text += f"{idx}. {k}: {v}\n"
 
-        # 删除多余的记忆
+        # 删除多余的群记忆
         if len(self.chat_preset.chat_memory) > config.MEMORY_MAX_LENGTH:
             self.chat_preset.chat_memory = {k: v for k, v in sorted(self.chat_preset.chat_memory.items(), key=lambda item: item[1])}
             self.chat_preset.chat_memory = {k: v for k, v in list(self.chat_preset.chat_memory.items())[:config.MEMORY_MAX_LENGTH]}
-            if config.DEBUG_LEVEL > 0: logger.info(f"删除多余记忆: {self.chat_preset.chat_memory}")
+            if config.DEBUG_LEVEL > 0: logger.info(f"删除多余群记忆: {self.chat_preset.chat_memory}")
+
+        # 记忆模块 - 用户个人记忆
+        user_memory_text = ''
+        user_memory = ''
+        if userid in self.chat_preset.user_memories:
+            user_memories = {k: v for k, v in self.chat_preset.user_memories[userid].items() if v}
+            idx = 0
+            for k, v in user_memories.items():
+                idx += 1
+                user_memory_text += f"{idx}. {k}: {v}\n"
 
         if config.MEMORY_ACTIVE:
-            memory = (
-                f"[历史记忆]\n"
-                f"{memory_text}\n"
-            ) if memory_text else ''
+            if group_memory_text:
+                group_memory = f"[群记忆]\n{group_memory_text}\n"
+            if user_memory_text:
+                user_memory = f"[你的记忆]\n{user_memory_text}\n"
+
+        memory = group_memory + user_memory
 
         summary = f"[压缩上下文摘要]\n{self.chat_preset.context_summary}\n\n" if self.chat_preset.context_summary else ''
 
@@ -209,6 +241,13 @@ class Chat:
             "[工具]\n"
             "需要搜索、网页抓取、浏览器访问或找图时，系统会用原生工具完成。\n"
         ) if config.LLM_ENABLE_TOOLS else ""
+
+        # 若当前会话启用了 Anima 画图，注入专家知识到工具上下文
+        from .llm_tool_plugins import anima_generate
+        if config.LLM_ENABLE_TOOLS and anima_generate.is_chat_enabled(self.chat_key):
+            anima_knowledge = anima_generate.get_knowledge()
+            if anima_knowledge:
+                tool_text += f"\n[你的绘画技能]\n{anima_knowledge}\n"
 
         rules = [   # 规则提示
             "像真实群聊成员一样自然说话，简短直接，不写文章；最多3段。",
@@ -481,7 +520,11 @@ class Chat:
 
     @staticmethod
     def _image_is_fresh(timestamp: float) -> bool:
-        return bool(timestamp) and time.time() - float(timestamp) <= 30 * 60
+        """检查图片是否在有效期内（使用配置的过期时间）"""
+        if not timestamp:
+            return False
+        fresh_seconds = max(1, config.MULTIMODAL_IMAGE_FRESH_MINUTES) * 60
+        return time.time() - float(timestamp) <= fresh_seconds
 
     def _message_text_for_prompt(self, item: ChatMessageData) -> str:
         if item.role == "assistant":
@@ -517,33 +560,47 @@ class Chat:
         return f"{role}({sender}): {text}{image_text}".strip()
 
     def _trim_prompt_messages_without_summary(self, preset: PresetData) -> None:
-        max_messages = max(1, config.CHAT_MEMORY_MAX_LENGTH * 2)
+        """滑动窗口截断：保留最近的CONTEXT_WINDOW_SIZE*2条消息"""
+        max_messages = max(1, config.CONTEXT_WINDOW_SIZE * 2)
         if len(preset.prompt_messages) > max_messages:
             del preset.prompt_messages[:len(preset.prompt_messages) - max_messages]
 
     async def _compress_prompt_messages_if_needed(self, preset: PresetData) -> None:
-        max_messages = max(1, config.CHAT_MEMORY_MAX_LENGTH * 2)
+        """压缩对话历史，支持重试和降级策略"""
+        max_messages = max(1, config.CONTEXT_WINDOW_SIZE * 2)
         overflow_count = len(preset.prompt_messages) - max_messages
         if overflow_count <= 0:
             return
 
         overflow_messages = preset.prompt_messages[:overflow_count]
-        if not config.CHAT_ENABLE_SUMMARY_CHAT:
+        if not config.CONTEXT_SUMMARY_ENABLED:
             del preset.prompt_messages[:overflow_count]
             return
 
         previous_summary = preset.context_summary.strip()
         overflow_text = "\n".join(self._format_prompt_message_for_summary(item) for item in overflow_messages)
-        prompt = (
-            f"[已有压缩摘要]\n{previous_summary or '无'}\n\n"
-            f"[本次需要压缩的旧对话]\n{overflow_text}\n\n"
-            "请把旧对话压缩成一段持续可用的上下文摘要，保留事实、用户偏好、未完成事项、重要图片描述和已达成结论。"
-            "不要加入不存在的信息，控制在300字以内。"
-        )
+        
         tg = TextGenerator.instance
-        res, success = await tg.get_response(prompt, type='summarize')
-        if success:
-            preset.context_summary = res.strip()
+        max_retries = 2
+        new_summary = None
+        
+        for attempt in range(max_retries):
+            prompt = (
+                f"[已有压缩摘要]\n{previous_summary or '无'}\n\n"
+                f"[本次需要压缩的旧对话]\n{overflow_text}\n\n"
+                "请把旧对话压缩成一段持续可用的上下文摘要，保留事实、用户偏好、未完成事项、重要图片描述和已达成结论。"
+                "不要加入不存在的信息，控制在300字以内。"
+            )
+            res, success = await tg.get_response(prompt, type='summarize')
+            if success:
+                new_summary = res.strip()
+                break
+            logger.warning(f"[会话: {self.chat_key}] 生成摘要失败 (尝试 {attempt + 1}/{max_retries}): {res}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(0.5)  # 短暂等待后重试
+        
+        if new_summary:
+            preset.context_summary = new_summary
             del preset.prompt_messages[:overflow_count]
             if config.DEBUG_LEVEL > 0:
                 logger.info(
@@ -551,8 +608,12 @@ class Chat:
                     f"摘要tokens={tg.cal_token_count(preset.context_summary)}"
                 )
         else:
-            logger.error(f"生成结构化上下文摘要失败: {res}")
-            del preset.prompt_messages[:overflow_count]
+            # 降级策略：保留最近的对话，丢弃最早的
+            logger.error(f"[会话: {self.chat_key}] 摘要生成失败，使用降级策略：保留最近对话")
+            keep_count = max_messages // 2
+            del preset.prompt_messages[:len(preset.prompt_messages) - keep_count]
+            # 清除旧摘要，因为可能不准确了
+            preset.context_summary = ""
 
     def _recent_image_context_messages(self, include_images: bool, used_images: Set[str]) -> List[Dict[str, Any]]:
         if not include_images or not config.MULTIMODAL_ENABLE:
@@ -603,12 +664,16 @@ class Chat:
             if isinstance(item, ChatMessageData) and item.role in {"user", "assistant"}
         ]
 
-        selected = source_messages[-max(1, config.CHAT_MEMORY_SHORT_LENGTH * 2):]
+        selected = source_messages[-max(1, config.CONTEXT_WINDOW_SIZE * 2):]
         messages: List[Dict[str, Any]] = []
         for item in selected:
+            content = self._message_content_for_prompt(item, include_images=include_images)
+            # 过滤掉 content 为空的纯 assistant 消息（没有 tool_calls 的），避免 400
+            if item.role == "assistant" and not content:
+                continue
             messages.append({
                 "role": "assistant" if item.role == "assistant" else "user",
-                "content": self._message_content_for_prompt(item, include_images=include_images),
+                "content": content,
             })
 
         used_images: Set[str] = set()
@@ -627,15 +692,31 @@ class Chat:
             else:
                 messages.extend(recent_image_messages)
 
+        # 使用准确的token计算方法
         tg = TextGenerator.instance
-        while len(messages) > 2 and tg.cal_token_count(str(messages)) > config.REQ_MAX_TOKENS:
+        while len(messages) > 2 and tg.cal_token_count(messages) > config.CONTEXT_TOKEN_BUDGET:
             messages.pop(0)
         return messages
 
     def _trim_messages_to_request_budget(self, messages: List[Dict[str, Any]]) -> None:
+        """智能截断：保留系统消息，优先删除非重要内容"""
         tg = TextGenerator.instance
-        while len(messages) > 3 and tg.cal_token_count(str(messages)) > config.REQ_MAX_TOKENS:
-            del messages[2]
+        while len(messages) > 3 and tg.cal_token_count(messages) > config.CONTEXT_TOKEN_BUDGET:
+            # 跳过前2条系统消息，从第3条开始找最早的消息删除
+            # 优先保留包含工具结果或摘要的消息
+            deleted = False
+            for i in range(2, len(messages)):
+                msg = messages[i]
+                content = msg.get("content", "")
+                # 跳过包含重要标记的消息
+                if isinstance(content, str) and any(marker in content for marker in ["[工具]", "[压缩上下文摘要]", "[历史记忆]"]):
+                    continue
+                del messages[i]
+                deleted = True
+                break
+            # 如果没有找到可删除的非重要消息，则删除第3条
+            if not deleted and len(messages) > 3:
+                del messages[2]
 
     def remove_last_prompt_user_message(self) -> None:
         preset = self.chat_preset_dicts.get(self._preset_key)

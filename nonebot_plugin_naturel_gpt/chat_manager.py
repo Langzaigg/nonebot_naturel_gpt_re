@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple
+﻿from typing import Dict, Optional, Tuple
 from .singleton import Singleton
 from .chat import Chat
 from .persistent_data_manager import PersistentDataManager
@@ -131,3 +131,4 @@ class ChatManager(Singleton["ChatManager"]):
             else:
                 fail_cnt += 1
         return (success_cnt, fail_cnt)
+    

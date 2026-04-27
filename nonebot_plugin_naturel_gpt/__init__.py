@@ -15,6 +15,7 @@ from .persistent_data_manager import PersistentDataManager
 from .chat_manager import ChatManager
 from . import matcher
 from . import matcher_MCRcon # noqa: F401
+from .llm_tool_plugins import init_tools
 
 
 def set_permission_check_func(callback:Callable[[Matcher, Event, Bot, str, str], Awaitable[Tuple[bool,Optional[str]]]]):
@@ -27,6 +28,9 @@ set_permission_check_func(utils.default_permission_check_func)
 """ ======== 读取历史记忆数据 ======== """
 PersistentDataManager.instance.load_from_file()
 ChatManager.instance.create_all_chat_object() # 启动时创建所有的已有Chat对象，以便被 -all 相关指令控制
+
+# 条件加载工具（如博查搜索需配置 key 才注册）
+init_tools(config)
 
 # 读取ApiKeys
 api_keys = config.OPENAI_API_KEYS

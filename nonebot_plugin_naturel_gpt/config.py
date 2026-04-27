@@ -55,8 +55,12 @@ class Config(BaseModel, extra=Extra.ignore):
     """单次总结最大token数"""
     REPLY_MAX_TOKENS: int
     """单次回复最大token数"""
-    REQ_MAX_TOKENS: int
-    """单次请求最大token数"""
+    CONTEXT_TOKEN_BUDGET: int
+    """上下文窗口token预算，控制prompt最大token数"""
+    CONTEXT_WINDOW_SIZE: int
+    """上下文窗口大小（消息条数），控制保留多少条最近对话"""
+    CONTEXT_SUMMARY_ENABLED: bool
+    """是否启用上下文摘要压缩，启用后超窗口的历史会被压缩为摘要"""
 
     LLM_ENABLE_STREAM: bool
     """是否使用流式响应"""
@@ -79,12 +83,6 @@ class Config(BaseModel, extra=Extra.ignore):
 
     CHAT_ENABLE_RECORD_ORTHER: bool
     """是否记录其他人的对话"""
-    CHAT_ENABLE_SUMMARY_CHAT: bool
-    """是否启用总结对话"""
-    CHAT_MEMORY_SHORT_LENGTH: int
-    """短期对话记忆长度"""
-    CHAT_MEMORY_MAX_LENGTH: int
-    """长期对话记忆长度"""
 
     NG_DATA_PICKLE: bool
     """是否强制使用pickle，默认使用json"""
@@ -141,6 +139,8 @@ class Config(BaseModel, extra=Extra.ignore):
     """多模态聊天记录视野长度"""
     MULTIMODAL_MAX_MESSAGES_WITH_IMAGES: int
     """最多保留几条消息中的图片"""
+    MULTIMODAL_IMAGE_FRESH_MINUTES: int
+    """图片有效期（分钟），超过此时间的图片不再作为上下文"""
 
     BOCHA_API_KEY: str
     BOCHA_API_BASE: str
@@ -149,6 +149,9 @@ class Config(BaseModel, extra=Extra.ignore):
     WEB_FETCH_MAX_CHARS: int
     PLAYWRIGHT_TIMEOUT: int
     LLM_TOOL_LOLICON_CONFIG: Dict[str, Any]
+
+    COMFYUI_BASE_URL: str
+    """ComfyUI Anima 画图服务地址"""
 
     UNLOCK_CONTENT_LIMIT: bool
     """解锁内容限制"""
@@ -202,7 +205,9 @@ CONFIG_TEMPLATE = {
 
     'CHAT_MAX_SUMMARY_TOKENS': 512,   # 单次总结最大token数
     'REPLY_MAX_TOKENS': 1024,   # 单次回复最大token数
-    'REQ_MAX_TOKENS': 3072,  # 单次请求最大token数
+    'CONTEXT_TOKEN_BUDGET': 3072,  # 上下文窗口token预算
+    'CONTEXT_WINDOW_SIZE': 16,  # 上下文窗口大小（消息条数）
+    'CONTEXT_SUMMARY_ENABLED': False,  # 是否启用上下文摘要压缩
 
     'LLM_ENABLE_STREAM': True,
     'LLM_SHOW_REASONING': False,
@@ -216,9 +221,6 @@ CONFIG_TEMPLATE = {
     'USER_MEMORY_SUMMARY_THRESHOLD': 12,  # 用户记忆阈值
 
     'CHAT_ENABLE_RECORD_ORTHER': True,  # 是否记录其他人的对话
-    'CHAT_ENABLE_SUMMARY_CHAT': False,   # 是否启用总结对话
-    'CHAT_MEMORY_SHORT_LENGTH': 8,  # 短期对话记忆长度
-    'CHAT_MEMORY_MAX_LENGTH': 16,   # 长期对话记忆长度
 
     'NG_DATA_PICKLE': False,  # 强制使用pickle
     'NG_DATA_PATH': "./data/naturel_gpt/",  # 数据文件目录
@@ -250,6 +252,7 @@ CONFIG_TEMPLATE = {
     'MULTIMODAL_ENABLE': True,
     'MULTIMODAL_HISTORY_LENGTH': 4,
     'MULTIMODAL_MAX_MESSAGES_WITH_IMAGES': 2,
+    'MULTIMODAL_IMAGE_FRESH_MINUTES': 30,
 
     'BOCHA_API_KEY': '',
     'BOCHA_API_BASE': 'https://api.bochaai.com/v1/web-search',
@@ -263,6 +266,8 @@ CONFIG_TEMPLATE = {
         'pic_proxy': None,
         'exclude_ai': True,
     },
+
+    'COMFYUI_BASE_URL': 'http://127.0.0.1:8188',
 
     'UNLOCK_CONTENT_LIMIT': False,  # 解锁内容限制
 
