@@ -1,7 +1,9 @@
 import asyncio
 import copy
+import json
 import time
 import random
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from .logger import logger
 
@@ -11,6 +13,30 @@ from .persistent_data_manager import ImpressionData, ChatData, PresetData, ChatM
 from .persona_loader import load_personas_from_directory
 
 # 会话类
+
+def _save_summary_log(chat_key: str, summary_type: str,
+                      summary_prompt: str, summary_response: str,
+                      context_summary: str, tool_call_summary: str) -> None:
+    """保存摘要日志：包含摘要 LLM 的请求/响应和最终摘要结果"""
+    log_dir = Path(config.NG_LOG_PATH)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    safe_key = chat_key.replace("/", "_").replace("\\", "_")
+    log_file = log_dir / f"{safe_key}.summary.json"
+    data = {
+        "chat_key": chat_key,
+        "type": summary_type,
+        "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
+        "summary_request": summary_prompt,
+        "summary_response": summary_response,
+        "context_summary": context_summary,
+        "tool_call_summary": tool_call_summary,
+    }
+    try:
+        with open(log_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"保存摘要日志失败: {e!r}")
+
 class Chat:
     """ ======== 定义会话类 ======== """
     _chat_data:ChatData         # 此chat_key关联的聊天数据
@@ -21,6 +47,9 @@ class Chat:
     is_insilence = False        # 是否处于沉默状态
     chat_attitude = 0           # 对话态度
     silence_time = 0            # 沉默时长
+    _compress_task: Optional[asyncio.Task] = None   # 正在运行的消息摘要任务
+    _tool_summary_task: Optional[asyncio.Task] = None  # 正在运行的工具摘要任务
+    _pending_overflow_text: str = ""  # 摘要任务运行期间累积的溢出文本
 
     def __init__(self, chat_data:ChatData, preset_key:str = ''):
         if not isinstance(chat_data, ChatData):
@@ -43,6 +72,33 @@ class Chat:
             else:   # 如果没有默认预设，则选择第一个预设
                 preset_key = list(self.chat_preset_dicts.keys())[0]
         self.change_presettings(preset_key)
+        self._context_buffer: List[Dict[str, Any]] = []  # 非触发消息临时缓冲
+
+    def push_context_buffer(self, sender: str, text: str, images: Optional[List[str]] = None) -> None:
+        """将非触发消息推入临时缓冲区，长度限制为 CONTEXT_BUFFER_SIZE"""
+        self._context_buffer.append({
+            "sender": sender,
+            "text": text,
+            "images": images or [],
+            "timestamp": time.time(),
+        })
+        max_buf = max(1, config.CONTEXT_BUFFER_SIZE)
+        if len(self._context_buffer) > max_buf:
+            self._context_buffer = self._context_buffer[-max_buf:]
+
+    def flush_context_buffer(self) -> Tuple[str, List[str]]:
+        """清空缓冲区，返回 (合并文本, 图片URL列表)。格式: [HH:MM] sender: text"""
+        if not self._context_buffer:
+            return "", []
+        parts = []
+        images = []
+        for item in self._context_buffer:
+            ts = time.strftime('%H:%M', time.localtime(item["timestamp"]))
+            img_note = f" [含{len(item['images'])}张图片]" if item.get("images") else ""
+            parts.append(f"[{ts}] {item['sender']}: {item['text']}{img_note}")
+            images.extend(item.get("images", []))
+        self._context_buffer = []
+        return "\n".join(parts), images
 
     async def update_chat_history_row(
         self,
@@ -54,6 +110,7 @@ class Chat:
         is_bot_reply: bool = False,
         record_for_prompt: bool = False,
         content_is_labeled: bool = False,
+        context_only: bool = False,
     ) -> None:
         """更新当前预设的结构化对话历史。"""
         tg = TextGenerator.instance
@@ -73,37 +130,26 @@ class Chat:
         if dropped_image_count and config.DEBUG_LEVEL > 0:
             logger.warning(f"[会话: {self.chat_key}] 已忽略 {dropped_image_count} 个不支持的图片 URL")
 
-        if valid_images and config.MULTIMODAL_ENABLE:
-            self._chat_data.chat_image_history.append({
-                "message_index": message_index,
-                "sender": sender,
-                "msg": msg,
-                "images": valid_images,
-                "timestamp": time.time(),
-                "time": time.strftime('%Y-%m-%d %H:%M:%S'),
-            })
-            max_image_history = max(
-                max(0, config.MULTIMODAL_HISTORY_LENGTH),
-                max(0, config.MULTIMODAL_MAX_MESSAGES_WITH_IMAGES),
-            )
-            if max_image_history:
-                self._chat_data.chat_image_history = self._chat_data.chat_image_history[-max_image_history:]
-            else:
-                self._chat_data.chat_image_history = []
-        
         if config.DEBUG_LEVEL > 0: 
             logger.info(
                 f"[会话: {self.chat_key}][预设: {self._preset_key}]添加结构化历史: {messageunit} | "
                 f"prompt_messages={len(preset.prompt_messages)} | images={len(valid_images)}"
             )
 
-        if record_for_prompt or is_bot_reply:
+        if record_for_prompt or is_bot_reply or context_only:
+            if context_only:
+                # 移除所有已有的 context_only 消息，保证仅保留最新一条
+                preset.prompt_messages = [
+                    m for m in preset.prompt_messages
+                    if not (isinstance(m, ChatMessageData) and m.context_only)
+                ]
             preset.prompt_messages.append(ChatMessageData(
                 role="assistant" if is_bot_reply else "user",
                 sender=sender,
                 text=msg,
                 images=valid_images,
                 content_is_labeled=content_is_labeled,
+                context_only=context_only,
                 timestamp=time.time(),
                 triggered=record_for_prompt,
             ))
@@ -116,8 +162,128 @@ class Chat:
         else:
             self._trim_prompt_messages_without_summary(preset)
 
+    async def save_tool_messages(self, tool_messages: List[Dict[str, Any]]) -> None:
+        """保存工具调用消息到内存中的prompt_messages（不持久化）"""
+        if not tool_messages:
+            return
+        
+        preset = self.chat_preset_dicts.get(self._preset_key)
+        if not preset:
+            logger.error(f"[会话: {self.chat_key}] 无法获取当前预设 '{self._preset_key}' 的数据")
+            return
+        
+        for msg in tool_messages:
+            role = msg.get("role", "")
+            if role == "assistant" and msg.get("tool_calls"):
+                preset.prompt_messages.append(ChatMessageData(
+                    role="assistant",
+                    sender=self._preset_key,
+                    text=msg.get("content", ""),
+                    tool_calls=msg.get("tool_calls", []),
+                    reasoning_content=msg.get("reasoning_content", ""),
+                    timestamp=time.time(),
+                ))
+            elif role == "tool":
+                preset.prompt_messages.append(ChatMessageData(
+                    role="tool",
+                    sender=self._preset_key,
+                    text=msg.get("content", ""),
+                    tool_call_id=msg.get("tool_call_id", ""),
+                    tool_name=msg.get("name", ""),
+                    timestamp=time.time(),
+                ))
+        
+        if config.DEBUG_LEVEL > 0:
+            logger.info(f"[会话: {self.chat_key}] 已保存 {len(tool_messages)} 条工具消息到内存")
+
+    async def generate_tool_call_summary(self, tool_messages: List[Dict[str, Any]], max_chars: int = 200) -> None:
+        """模式3: 异步生成工具调用摘要，存储到对应 assistant 消息的 tool_call_summary 字段。"""
+        if config.TOOL_CONTEXT_MODE != 3 or not tool_messages:
+            return
+
+        # 提取非记忆模块的工具调用
+        tool_entries: List[Dict[str, Any]] = []
+        for msg in tool_messages:
+            if msg.get("role") == "assistant" and msg.get("tool_calls"):
+                for tc in msg["tool_calls"]:
+                    func = tc.get("function", {})
+                    name = func.get("name", "")
+                    if name == "manage_memory":
+                        continue
+                    try:
+                        args = json.loads(func.get("arguments", "{}")) if isinstance(func.get("arguments"), str) else func.get("arguments", {})
+                    except Exception:
+                        args = {}
+                    tool_entries.append({"name": name, "args": args})
+            elif msg.get("role") == "tool":
+                name = msg.get("name", "")
+                if name == "manage_memory":
+                    continue
+                tool_entries.append({"name": name, "result": msg.get("content", "")[:300]})
+
+        if not tool_entries:
+            return
+
+        # 找到最后一个带 tool_calls 的 assistant 消息
+        target_msg: Optional[ChatMessageData] = None
+        for msg in reversed(self.chat_preset.prompt_messages):
+            if isinstance(msg, ChatMessageData) and msg.role == "assistant" and msg.tool_calls:
+                target_msg = msg
+                break
+        if not target_msg:
+            return
+
+        # 同步生成截断原文作为 fallback，立即写入
+        raw_parts = []
+        for entry in tool_entries:
+            if "result" in entry:
+                raw_parts.append(f"{entry['name']}: {entry['result'][:80]}")
+            else:
+                raw_parts.append(f"{entry['name']}({json.dumps(entry.get('args', {}), ensure_ascii=False)[:60]})")
+        fallback_summary = "；".join(raw_parts)[:max_chars]
+        target_msg.tool_call_summary = fallback_summary
+
+        # 如果已有任务在运行，跳过 LLM 调用（fallback 已就位）
+        if self._tool_summary_task and not self._tool_summary_task.done():
+            if config.DEBUG_LEVEL > 0:
+                logger.info(f"[会话: {self.chat_key}] 工具摘要任务运行中，跳过本次 LLM 摘要")
+            return
+
+        # 启动后台 LLM 摘要任务
+        summary_input = json.dumps(tool_entries, ensure_ascii=False)
+        chat_key = self.chat_key
+
+        async def _do_tool_summary():
+            prompt = (
+                f"[工具调用记录]\n{summary_input}\n\n"
+                f"请用一句话概括上述工具调用的用途和结果，不超过{max_chars}字。"
+                f"只输出概括文本，不要加任何前缀或标签。"
+            )
+            tg = TextGenerator.instance
+            summary_response = ""
+            try:
+                res, success = await tg.get_response(prompt, type='summarize')
+                summary_response = res or ""
+                if success and res and res.strip():
+                    target_msg.tool_call_summary = res.strip()[:max_chars]
+                    if config.DEBUG_LEVEL > 0:
+                        logger.info(f"[会话: {chat_key}] 工具调用摘要(LLM): {target_msg.tool_call_summary}")
+                    _save_summary_log(chat_key, "tool", prompt, summary_response,
+                                      self.chat_preset.context_summary, target_msg.tool_call_summary)
+                    return
+            except Exception as e:
+                summary_response = f"[异常] {e!r}"
+                logger.warning(f"[会话: {chat_key}] 工具调用摘要 LLM 异常: {e!r}")
+            # LLM 失败时保留 fallback，无需额外操作
+            if config.DEBUG_LEVEL > 0:
+                logger.info(f"[会话: {chat_key}] 工具调用摘要 LLM 失败，保留 fallback")
+            _save_summary_log(chat_key, "tool", prompt, summary_response,
+                              self.chat_preset.context_summary, target_msg.tool_call_summary)
+
+        self._tool_summary_task = asyncio.create_task(_do_tool_summary())
+
     async def update_chat_history_row_for_user(self, sender:str, msg: str, userid:str, username:str, require_summary:bool = False) -> None:
-        """更新对特定用户的对话历史行，使用智能淘汰策略"""
+        """更新对特定用户的对话历史行（仅累积，印象由摘要任务统一生成）"""
         if userid not in self.chat_preset.chat_impressions:
             impression_data = ImpressionData(user_id=userid)
             self.chat_preset.chat_impressions[userid] = impression_data
@@ -127,38 +293,10 @@ class Chat:
         messageunit = tg.generate_msg_template(sender=sender, msg=msg)
         impression_data.chat_history.append(messageunit)
         if config.DEBUG_LEVEL > 0: logger.info(f"添加对话历史行: {messageunit}  |  当前对话历史行数: {len(impression_data.chat_history)}")
-        # 保证对话历史不超过最大长度
-        if len(impression_data.chat_history) > config.USER_MEMORY_SUMMARY_THRESHOLD and require_summary:
-            # 保留最近的对话和包含关键词的重要历史
-            keep_recent = min(10, len(impression_data.chat_history) // 2)
-            recent_history = impression_data.chat_history[-keep_recent:]
-            
-            # 智能筛选：保留包含bot名、@、重要关键词的消息
-            important_keywords = {self._preset_key, "重要", "记住", "忘记"}
-            important_old = [
-                h for h in impression_data.chat_history[:-keep_recent]
-                if any(kw.lower() in h.lower() for kw in important_keywords)
-            ][-5:]  # 最多保留5条重要旧消息
-            
-            # 合并用于摘要的历史
-            history_for_summary = important_old + recent_history
-            
-            prev_summarized = f"上次印象：{impression_data.chat_impression}\n\n"
-            history_str = '\n'.join(history_for_summary)
-            prompt = (   # 以机器人的视角总结对话
-                f"{prev_summarized}[对话]\n"
-                f"{history_str}"
-                f"\n\n{self.chat_preset.bot_self_introl}\n请以{self.chat_preset.preset_key}的视角简要更新对{username}的印象，只需在200字内输出新的印象"
-            )
-            res, success = await tg.get_response(prompt, type='summarize')  # 生成新的对话历史摘要
-            if success:
-                impression_data.chat_impression = res.strip()
-            else:
-                logger.error(f"生成对话印象摘要失败: {res}")
-            logger.info(f"生成对话印象摘要: {self.chat_preset.chat_impressions[userid]}")
-            if config.DEBUG_LEVEL > 0: logger.info(f"印象生成消耗token数: {tg.cal_token_count(prompt + impression_data.chat_impression)}")
-            # 保留最近的历史，而非清空
-            impression_data.chat_history = recent_history
+        # 保证对话历史不超过最大长度，超出时丢弃最早的
+        max_history = max(1, config.USER_MEMORY_SUMMARY_THRESHOLD * 2)
+        if len(impression_data.chat_history) > max_history:
+            impression_data.chat_history = impression_data.chat_history[-max_history:]
 
     def set_memory(self, mem_key:str, mem_value:str = '') -> None:
         """为当前预设设置记忆，支持智能淘汰"""
@@ -178,23 +316,9 @@ class Chat:
             self.chat_preset.chat_memory[mem_key] = mem_value
             if config.DEBUG_LEVEL > 0: logger.info(f"记住了: {mem_key} -> {mem_value}")
 
-            # 智能淘汰：当超出最大长度时，优先删除非关键记忆
+            # 超出上限时仅记录警告，不再自动删除；由 LLM 通过 consolidate 主动整理
             if len(self.chat_preset.chat_memory) > config.MEMORY_MAX_LENGTH:
-                # 优先保留包含重要关键词的记忆
-                important_keywords = {"重要", "关键", "记住", "名字", "身份", "偏好"}
-                memory_items = list(self.chat_preset.chat_memory.items())
-                
-                # 找到第一个非重要的记忆删除
-                for del_key, del_value in memory_items:
-                    if not any(kw in del_value for kw in important_keywords):
-                        del self.chat_preset.chat_memory[del_key]
-                        if config.DEBUG_LEVEL > 0: logger.info(f"忘记了: {del_key} (智能淘汰，超出最大记忆长度)")
-                        break
-                else:
-                    # 如果都是重要记忆，则删除最早的
-                    del_key = memory_items[0][0]
-                    del self.chat_preset.chat_memory[del_key]
-                    if config.DEBUG_LEVEL > 0: logger.info(f"忘记了: {del_key} (超出最大记忆长度)")
+                logger.warning(f"群记忆已超出上限: {len(self.chat_preset.chat_memory)}/{config.MEMORY_MAX_LENGTH}，等待 LLM 调用 consolidate 整理")
 
     def get_chat_prompt_template(self, userid:str, chat_type:str = '', include_images: bool = True)-> List[Dict[str, Any]]:
         """对话 prompt 模板生成"""
@@ -211,11 +335,9 @@ class Chat:
             idx += 1
             group_memory_text += f"{idx}. {k}: {v}\n"
 
-        # 删除多余的群记忆
+        # 群记忆超出上限时仅记录警告，由 LLM 通过 consolidate 主动整理
         if len(self.chat_preset.chat_memory) > config.MEMORY_MAX_LENGTH:
-            self.chat_preset.chat_memory = {k: v for k, v in sorted(self.chat_preset.chat_memory.items(), key=lambda item: item[1])}
-            self.chat_preset.chat_memory = {k: v for k, v in list(self.chat_preset.chat_memory.items())[:config.MEMORY_MAX_LENGTH]}
-            if config.DEBUG_LEVEL > 0: logger.info(f"删除多余群记忆: {self.chat_preset.chat_memory}")
+            logger.warning(f"群记忆已超出上限: {len(self.chat_preset.chat_memory)}/{config.MEMORY_MAX_LENGTH}")
 
         # 记忆模块 - 用户个人记忆
         user_memory_text = ''
@@ -281,17 +403,17 @@ class Chat:
         ) if chat_type == 'server' else ''
 
         messages: List[Dict[str, Any]] = [
-            {'role': 'system', 'content': ( # 系统消息
+            {'role': 'system', 'content': ( # 系统消息 - 角色+规则（极稳定前缀，利于缓存）
                 f"{MC_prompt}你正在以第一人称扮演指定角色参与聊天。"
+                f"\n[角色设定]\n{self.chat_preset.bot_self_introl}\n"
+                f"\n只生成 {self.chat_preset.preset_key} 的响应内容，不要生成其他人的回复。"
                 f"\n{tool_text}"
                 f"\n{res_rule_prompt}"
             )},
-            {'role': 'system', 'content': (
-                f"[角色设定]\n{self.chat_preset.bot_self_introl}\n\n"
+            {'role': 'system', 'content': ( # 系统消息 - 上下文（日级变化，摘要/记忆会话级变化）
                 f"{summary}{memory}{impression_text}"
-                f"\n[当前信息]\n当前时间: {time.strftime('%Y-%m-%d %H:%M:%S %A')}\n"
-                f"当前角色: {self.chat_preset.preset_key}\n"
-                f"只生成 {self.chat_preset.preset_key} 的响应内容，不要生成其他人的回复。"
+                f"当前日期: {time.strftime('%Y-%m-%d %A')}\n"
+                f"当前角色: {self.chat_preset.preset_key}"
             )},
         ]
 
@@ -299,6 +421,33 @@ class Chat:
         self._trim_messages_to_request_budget(messages)
         return messages
     
+    def get_active_profile(self) -> str:
+        """获取当前会话的 profile 名，为空时返回全局默认"""
+        return self._chat_data.active_profile or config.OPENAI_ACTIVE_PROFILE or ""
+
+    def set_active_profile(self, profile_name: str) -> None:
+        """设置当前会话的 profile"""
+        self._chat_data.active_profile = profile_name
+
+    def apply_profile(self) -> bool:
+        """如果当前会话的 profile 与 TextGenerator 不同，切换并返回 True"""
+        from .openai_func import TextGenerator
+        target = self.get_active_profile()
+        profiles = config.OPENAI_PROFILES
+        if not target or not profiles or target not in profiles:
+            return False
+        tg = TextGenerator.instance
+        # 检查当前是否已经是目标 profile（通过比较 model 名判断）
+        current_model = tg.config.get("model", "")
+        target_model = profiles[target].get("model", "")
+        if current_model == target_model:
+            return False
+        tg.switch_profile(target, profiles[target])
+        config.OPENAI_ACTIVE_PROFILE = target
+        if config.DEBUG_LEVEL > 0:
+            logger.info(f"[会话: {self.chat_key}] 自动切换 profile: {target} ({target_model})")
+        return True
+
     def generate_description(self, hide_chat_key:bool=False) -> str:
         """获取当前会话描述"""
         if hide_chat_key:
@@ -516,7 +665,7 @@ class Chat:
         if not url:
             return False
         url = str(url).strip()
-        return url.startswith(("http://", "https://", "data:image/"))
+        return url.startswith(("http://", "https://", "data:image/", "file:///"))
 
     @staticmethod
     def _image_is_fresh(timestamp: float) -> bool:
@@ -535,9 +684,11 @@ class Chat:
         sender = item.sender or ("Bot" if item.role == "assistant" else "用户")
         text = item.text or ""
         parts = []
-        parts.append(f"{sender}: {text}")
-        if item.images:
-            parts.append("[本条消息包含图片]")
+        # user 消息附加时间标记，提升 prompt 缓存命中率（时间信息随消息变化，不破坏系统前缀）
+        time_prefix = ""
+        if item.role != "assistant" and item.timestamp:
+            time_prefix = f"[{time.strftime('%H:%M', time.localtime(item.timestamp))}] "
+        parts.append(f"{time_prefix}{sender}: {text}")
         return "\n".join([p for p in parts if p]).strip()
 
     def _message_content_for_prompt(self, item: ChatMessageData, include_images: bool) -> Any:
@@ -559,147 +710,391 @@ class Chat:
         image_text = " [包含图片]" if item.images else ""
         return f"{role}({sender}): {text}{image_text}".strip()
 
+    def _cleanup_orphan_tool_messages(self, messages: List[ChatMessageData]) -> List[ChatMessageData]:
+        """清理孤立的tool消息，确保tool_calls和tool消息配对"""
+        result = []
+        i = 0
+        while i < len(messages):
+            item = messages[i]
+            if item.role == "assistant" and item.tool_calls:
+                # 找到assistant的tool_calls，收集对应的tool消息
+                tool_call_ids = {tc.get("id") for tc in item.tool_calls if tc.get("id")}
+                result.append(item)
+                i += 1
+                # 收集紧随其后的tool消息
+                while i < len(messages) and messages[i].role == "tool" and messages[i].tool_call_id in tool_call_ids:
+                    result.append(messages[i])
+                    tool_call_ids.discard(messages[i].tool_call_id)
+                    i += 1
+            elif item.role == "tool":
+                # 孤立的tool消息，跳过
+                i += 1
+            else:
+                result.append(item)
+                i += 1
+        return result
+
+    @staticmethod
+    def _count_rounds(messages: List[ChatMessageData]) -> int:
+        """统计消息列表中的对话轮数（以 user 消息计数，排除 context_only）"""
+        return sum(1 for m in messages if m.role == "user" and not m.context_only)
+
     def _trim_prompt_messages_without_summary(self, preset: PresetData) -> None:
-        """滑动窗口截断：保留最近的CONTEXT_WINDOW_SIZE*2条消息"""
-        max_messages = max(1, config.CONTEXT_WINDOW_SIZE * 2)
-        if len(preset.prompt_messages) > max_messages:
-            del preset.prompt_messages[:len(preset.prompt_messages) - max_messages]
+        """滑动窗口截断：保留最近 CONTEXT_WINDOW_SIZE 轮对话，保护工具调用链完整性"""
+        max_rounds = max(1, config.CONTEXT_WINDOW_SIZE)
+        # 先清理孤立的tool消息
+        preset.prompt_messages = self._cleanup_orphan_tool_messages(preset.prompt_messages)
+        # 从末尾向前数 max_rounds 轮，找到截断点（排除 context_only）
+        rounds = 0
+        cut_index = 0
+        for i in range(len(preset.prompt_messages) - 1, -1, -1):
+            if preset.prompt_messages[i].role == "user" and not preset.prompt_messages[i].context_only:
+                rounds += 1
+                if rounds > max_rounds:
+                    cut_index = i
+                    break
+        else:
+            # 不足 max_rounds 轮，不截断
+            return
+        if cut_index > 0:
+            del preset.prompt_messages[:cut_index]
 
     async def _compress_prompt_messages_if_needed(self, preset: PresetData) -> None:
-        """压缩对话历史，支持重试和降级策略"""
-        max_messages = max(1, config.CONTEXT_WINDOW_SIZE * 2)
-        overflow_count = len(preset.prompt_messages) - max_messages
-        if overflow_count <= 0:
+        """压缩对话历史：立即截断窗口，异步生成摘要。摘要未完成前保留旧摘要。"""
+        max_rounds = max(1, config.CONTEXT_WINDOW_SIZE)
+        
+        # 分离普通消息和工具消息
+        normal_messages = [m for m in preset.prompt_messages if not (isinstance(m, ChatMessageData) and m.role in {"tool", "assistant"} and m.tool_calls)]
+        
+        current_rounds = self._count_rounds(normal_messages)
+        overflow_rounds = current_rounds - max_rounds
+        threshold = int(max_rounds * max(0, getattr(config, 'CONTEXT_COMPRESS_THRESHOLD_RATIO', 0.5)))
+        if overflow_rounds <= threshold:
             return
 
-        overflow_messages = preset.prompt_messages[:overflow_count]
+        # 找到溢出轮的截断点（第 overflow_rounds 个 user 消息的位置，排除 context_only）
+        user_count = 0
+        cut_index = 0
+        for i, msg in enumerate(preset.prompt_messages):
+            if not (isinstance(msg, ChatMessageData) and msg.role in {"tool", "assistant"} and msg.tool_calls):
+                if msg.role == "user" and not msg.context_only:
+                    user_count += 1
+                    if user_count > overflow_rounds:
+                        cut_index = i
+                        break
+
+        if cut_index <= 0:
+            return
+
+        overflow_messages = [m for m in preset.prompt_messages[:cut_index] 
+                           if not (isinstance(m, ChatMessageData) and m.role in {"tool", "assistant"} and m.tool_calls)]
+
         if not config.CONTEXT_SUMMARY_ENABLED:
-            del preset.prompt_messages[:overflow_count]
+            del preset.prompt_messages[:cut_index]
             return
 
-        previous_summary = preset.context_summary.strip()
-        overflow_text = "\n".join(self._format_prompt_message_for_summary(item) for item in overflow_messages)
-        
-        tg = TextGenerator.instance
-        max_retries = 2
-        new_summary = None
-        
-        for attempt in range(max_retries):
-            prompt = (
-                f"[已有压缩摘要]\n{previous_summary or '无'}\n\n"
-                f"[本次需要压缩的旧对话]\n{overflow_text}\n\n"
-                "请把旧对话压缩成一段持续可用的上下文摘要，保留事实、用户偏好、未完成事项、重要图片描述和已达成结论。"
-                "不要加入不存在的信息，控制在300字以内。"
-            )
-            res, success = await tg.get_response(prompt, type='summarize')
-            if success:
-                new_summary = res.strip()
-                break
-            logger.warning(f"[会话: {self.chat_key}] 生成摘要失败 (尝试 {attempt + 1}/{max_retries}): {res}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(0.5)  # 短暂等待后重试
-        
-        if new_summary:
-            preset.context_summary = new_summary
-            del preset.prompt_messages[:overflow_count]
+        # 如果有摘要任务正在运行，只截断窗口，累积溢出文本
+        if self._compress_task and not self._compress_task.done():
+            overflow_text = "\n".join(self._format_prompt_message_for_summary(item) for item in overflow_messages)
+            self._pending_overflow_text += "\n" + overflow_text
+            del preset.prompt_messages[:cut_index]
             if config.DEBUG_LEVEL > 0:
-                logger.info(
-                    f"[会话: {self.chat_key}][预设: {preset.preset_key}] 已压缩 {overflow_count} 条结构化上下文 | "
-                    f"摘要tokens={tg.cal_token_count(preset.context_summary)}"
+                logger.info(f"[会话: {self.chat_key}] 摘要任务运行中，已截断 {overflow_rounds} 轮({cut_index}条)，溢出文本已累积")
+            return
+
+        # 快照溢出文本（含之前累积的），立即删除溢出消息
+        overflow_text = "\n".join(self._format_prompt_message_for_summary(item) for item in overflow_messages)
+        if self._pending_overflow_text:
+            overflow_text = self._pending_overflow_text + "\n" + overflow_text
+            self._pending_overflow_text = ""
+        del preset.prompt_messages[:cut_index]
+
+        if config.DEBUG_LEVEL > 0:
+            logger.info(f"[会话: {self.chat_key}][预设: {preset.preset_key}] 已截断 {overflow_rounds} 轮({cut_index}条)，后台生成摘要中...")
+
+        # 启动后台摘要任务
+        chat_key = self.chat_key
+        preset_key = preset.preset_key
+
+        async def _do_compress():
+            tg = TextGenerator.instance
+            max_retries = 2
+            new_summary = None
+            summary_prompt = ""
+            summary_response = ""
+            # 读取最新的 previous_summary（可能已被前一个任务更新）
+            latest_previous = preset.context_summary.strip()
+            for attempt in range(max_retries):
+                prompt = (
+                    f"[已有压缩摘要]\n{latest_previous or '无'}\n\n"
+                    f"[本次需要压缩的旧对话]\n{overflow_text}\n\n"
+                    "请把旧对话压缩成一段持续可用的上下文摘要，保留事实、用户偏好、未完成事项、重要图片描述和已达成结论。"
+                    "不要加入不存在的信息，控制在300字以内。"
                 )
-        else:
-            # 降级策略：保留最近的对话，丢弃最早的
-            logger.error(f"[会话: {self.chat_key}] 摘要生成失败，使用降级策略：保留最近对话")
-            keep_count = max_messages // 2
-            del preset.prompt_messages[:len(preset.prompt_messages) - keep_count]
-            # 清除旧摘要，因为可能不准确了
-            preset.context_summary = ""
+                summary_prompt = prompt
+                try:
+                    res, success = await tg.get_response(prompt, type='summarize')
+                    summary_response = res or ""
+                    if success and res and res.strip():
+                        new_summary = res.strip()
+                        break
+                    logger.warning(f"[会话: {chat_key}] 摘要生成失败 (尝试 {attempt + 1}/{max_retries}): {res}")
+                except Exception as e:
+                    summary_response = f"[异常] {e!r}"
+                    logger.warning(f"[会话: {chat_key}] 摘要生成异常 (尝试 {attempt + 1}/{max_retries}): {e!r}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(0.5)
 
-    def _recent_image_context_messages(self, include_images: bool, used_images: Set[str]) -> List[Dict[str, Any]]:
-        if not include_images or not config.MULTIMODAL_ENABLE:
-            return []
+            if new_summary:
+                preset.context_summary = new_summary
+                if config.DEBUG_LEVEL > 0:
+                    logger.info(
+                        f"[会话: {chat_key}][预设: {preset_key}] 摘要生成完成 | "
+                        f"摘要tokens={tg.cal_token_count(new_summary)}"
+                    )
+            else:
+                # 失败时保留旧摘要，不做降级删除（消息已截断，旧摘要仍可用）
+                logger.warning(f"[会话: {chat_key}] 摘要生成失败，保留旧摘要")
 
-        history_length = max(0, config.MULTIMODAL_HISTORY_LENGTH)
-        max_image_messages = max(0, config.MULTIMODAL_MAX_MESSAGES_WITH_IMAGES)
-        if not history_length or not max_image_messages:
-            return []
+            _save_summary_log(chat_key, "context", summary_prompt, summary_response,
+                              preset.context_summary, preset.tool_call_summary)
 
-        result: List[Dict[str, Any]] = []
-        min_history_index = max(0, self._chat_data.next_message_index - history_length)
-        for item in self._chat_data.chat_image_history:
-            message_index = item.get("message_index", item.get("history_index"))
-            if isinstance(message_index, int) and message_index < min_history_index:
-                continue
+            # 并入印象生成：对有累积历史的用户生成印象
+            for uid, imp in preset.chat_impressions.items():
+                if not imp.chat_history:
+                    continue
+                imp_prompt = (
+                    f"[已有印象]\n{imp.chat_impression or '无'}\n\n"
+                    f"[近期对话]\n{chr(10).join(imp.chat_history[-20:])}\n\n"
+                    f"请以{preset_key}的视角简要更新对该用户的印象，200字内，只输出印象文本。"
+                )
+                try:
+                    imp_res, imp_success = await tg.get_response(imp_prompt, type='summarize')
+                    if imp_success and imp_res and imp_res.strip():
+                        imp.chat_impression = imp_res.strip()[:200]
+                except Exception:
+                    pass  # 印象生成失败不影响主流程
 
-            timestamp = item.get("timestamp")
-            if not timestamp or not self._image_is_fresh(timestamp):
-                continue
-
-            images = [
-                url for url in item.get("images", [])
-                if self._is_supported_image_url(url) and url not in used_images
-            ]
-            if not images:
-                continue
-
-            used_images.update(images)
-            sender = item.get("sender") or "用户"
-            text = (item.get("msg") or "").strip() or "[图片]"
-            result.append({
-                "role": "user",
-                "content": [{"type": "text", "text": f"[群内最近图片上下文]\n{sender}: {text}"}] + [
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                    for image_url in images
-                ],
-            })
-        return result[-max_image_messages:]
+        self._compress_task = asyncio.create_task(_do_compress())
 
     def _build_openai_history_messages(self, include_images: bool = True) -> List[Dict[str, Any]]:
         preset = self.chat_preset_dicts.get(self._preset_key)
         if not preset:
             return []
 
+        tool_context_mode = getattr(config, 'TOOL_CONTEXT_MODE', 3)
         source_messages = [
             item for item in preset.prompt_messages
-            if isinstance(item, ChatMessageData) and item.role in {"user", "assistant"}
+            if isinstance(item, ChatMessageData) and item.role in {"user", "assistant", "tool"}
         ]
 
-        selected = source_messages[-max(1, config.CONTEXT_WINDOW_SIZE * 2):]
-        messages: List[Dict[str, Any]] = []
+        # 按轮选取：从末尾向前找 CONTEXT_WINDOW_SIZE 轮的起始位置（排除 context_only）
+        max_rounds = max(1, config.CONTEXT_WINDOW_SIZE)
+        rounds = 0
+        start_idx = 0
+        for i in range(len(source_messages) - 1, -1, -1):
+            if source_messages[i].role == "user" and not source_messages[i].context_only:
+                rounds += 1
+                if rounds > max_rounds:
+                    start_idx = i
+                    break
+        selected = source_messages[start_idx:]
+        
+        # 模式3: 工具消息和思考内容不注入上下文（由摘要替代）
+        include_tool_history = tool_context_mode == 1
+        include_reasoning = tool_context_mode in (1, 2)
+        
+        # 分离普通消息和工具消息
+        normal_items = []
+        tool_items = []
         for item in selected:
-            content = self._message_content_for_prompt(item, include_images=include_images)
-            # 过滤掉 content 为空的纯 assistant 消息（没有 tool_calls 的），避免 400
-            if item.role == "assistant" and not content:
+            if item.role == "tool":
+                if include_tool_history:
+                    tool_items.append(item)
+            elif item.role == "assistant" and item.tool_calls:
+                if include_tool_history:
+                    tool_items.append(item)
+                elif item.tool_call_summary:
+                    # 模式3: 有摘要的 assistant 消息作为普通消息注入
+                    normal_items.append(item)
+            else:
+                normal_items.append(item)
+        
+        # 构建普通消息（默认不带图片，图片由下方门控逻辑注入）
+        normal_messages: List[Dict[str, Any]] = []
+        for item in normal_items:
+            content = self._message_content_for_prompt(item, include_images=False)
+            # 模式3: 将工具调用摘要注入到 assistant 消息内容中
+            if item.role == "assistant" and item.tool_call_summary and item.tool_calls:
+                summary_text = f"[工具调用摘要] {item.tool_call_summary}"
+                content = f"{summary_text}\n{content}" if content else summary_text
+            if item.role == "assistant" and not content and not (include_reasoning and item.reasoning_content):
                 continue
-            messages.append({
+            msg: Dict[str, Any] = {
                 "role": "assistant" if item.role == "assistant" else "user",
                 "content": content,
-            })
-
-        used_images: Set[str] = set()
-        if include_images:
-            for item in selected:
-                if self._image_is_fresh(item.timestamp):
-                    used_images.update([url for url in item.images if self._is_supported_image_url(url)])
-
-        recent_image_messages = self._recent_image_context_messages(
-            include_images=include_images,
-            used_images=used_images,
-        )
-        if recent_image_messages:
-            if messages and messages[-1].get("role") == "user":
-                messages[-1:-1] = recent_image_messages
-            else:
-                messages.extend(recent_image_messages)
-
-        # 使用准确的token计算方法
+            }
+            if include_reasoning and item.role == "assistant" and item.reasoning_content:
+                msg["reasoning_content"] = item.reasoning_content
+            normal_messages.append(msg)
+        
+        # 构建工具调用组（assistant+tool_calls + tool结果 作为一组）
+        tool_groups: List[List[Dict[str, Any]]] = []
+        current_group: List[Dict[str, Any]] = []
+        for item in tool_items:
+            content = self._message_content_for_prompt(item, include_images=False)
+            if item.role == "assistant" and item.tool_calls:
+                # 新的一组开始
+                if current_group:
+                    tool_groups.append(current_group)
+                    current_group = []
+                msg: Dict[str, Any] = {
+                    "role": "assistant",
+                    "content": content or "",
+                    "tool_calls": item.tool_calls,
+                }
+                if include_reasoning and item.reasoning_content:
+                    msg["reasoning_content"] = item.reasoning_content
+                current_group.append(msg)
+            elif item.role == "tool":
+                current_group.append({
+                    "role": "tool",
+                    "tool_call_id": item.tool_call_id,
+                    "name": item.tool_name,
+                    "content": content,
+                })
+        if current_group:
+            tool_groups.append(current_group)
+        
+        # reasoning和tool共用token预算，从旧到新逐组去除，至少保留最新一组
         tg = TextGenerator.instance
+        tool_token_budget = getattr(config, 'TOOL_CONTEXT_TOKEN_BUDGET', 4096)
+        
+        # 构建需要预算检查的消息列表（reasoning + tool groups）
+        budget_messages = []
+        for msg in normal_messages:
+            if msg.get("role") == "assistant" and msg.get("reasoning_content"):
+                budget_messages.append(msg)
+        for group in tool_groups:
+            budget_messages.extend(group)
+        
+        while budget_messages and len(tool_groups) > 0 and tg.cal_token_count(budget_messages) > tool_token_budget:
+            # 优先去除最旧的tool组
+            if tool_groups:
+                tool_groups.pop(0)
+            budget_messages = []
+            for msg in normal_messages:
+                if msg.get("role") == "assistant" and msg.get("reasoning_content"):
+                    budget_messages.append(msg)
+            for group in tool_groups:
+                budget_messages.extend(group)
+        
+        # 过滤不完整的工具组（缺少 tool 结果的 assistant+tool_calls）和 tool_call_id 为空的消息
+        complete_groups: List[List[Dict[str, Any]]] = []
+        for group in tool_groups:
+            has_tool_result = any(m.get("role") == "tool" and m.get("tool_call_id") for m in group)
+            if has_tool_result:
+                filtered = [m for m in group if m.get("role") != "tool" or m.get("tool_call_id")]
+                complete_groups.append(filtered)
+        tool_messages = [msg for group in complete_groups for msg in group]
+        
+        # 如果关闭reasoning，从normal_messages中去掉reasoning_content
+        if not include_reasoning:
+            for msg in normal_messages:
+                msg.pop("reasoning_content", None)
+        
+        messages = normal_messages + tool_messages
+
+        # === 图片门控 ===
+        # 默认：只有触发消息携带图片。若触发消息含图片关键词，从历史从新到旧搜索
+        # 额外图片注入（总数受 MULTIMODAL_MAX_MESSAGES_WITH_IMAGES 约束）。
+        if include_images and config.MULTIMODAL_ENABLE:
+            max_img_msgs = max(0, config.MULTIMODAL_MAX_MESSAGES_WITH_IMAGES)
+            image_keywords = ("图", "画", "看", "照片", "截图", "image", "pic", "photo")
+
+            # 找到触发消息在 normal_items 中的索引（最后一条非 context_only 的 user）
+            trigger_item = None
+            trigger_normal_idx = -1
+            for idx, item in enumerate(normal_items):
+                if item.role == "user" and not item.context_only:
+                    trigger_item = item
+                    trigger_normal_idx = idx
+
+            # 始终注入触发消息图片
+            if trigger_item and trigger_normal_idx >= 0 and trigger_normal_idx < len(normal_messages):
+                normal_messages[trigger_normal_idx]["content"] = self._message_content_for_prompt(
+                    trigger_item, include_images=True)
+
+            # 关键词检测
+            trigger_text = trigger_item.text if trigger_item else ""
+            has_image_keyword = any(kw in trigger_text for kw in image_keywords)
+
+            if has_image_keyword:
+                used_images: Set[str] = set()
+                if trigger_item:
+                    used_images.update(
+                        url for url in trigger_item.images
+                        if self._is_supported_image_url(url) and self._image_is_fresh(trigger_item.timestamp))
+
+                # 从新到旧搜索历史，找到对应 normal_items 中的消息，注入图片
+                for item in reversed(normal_items):
+                    if item is trigger_item or item.context_only:
+                        continue
+                    if not item.images or not self._image_is_fresh(item.timestamp):
+                        continue
+                    imgs = [url for url in item.images
+                            if self._is_supported_image_url(url) and url not in used_images]
+                    if not imgs:
+                        continue
+                    # 找到该 item 在 normal_items 中的位置
+                    try:
+                        ni = normal_items.index(item)
+                    except ValueError:
+                        continue
+                    if ni >= len(normal_messages):
+                        continue
+                    # 如果注入后总数超限，停止
+                    # 先统计当前 messages 中已有图片的消息数
+                    current_img_msgs = sum(1 for msg in normal_messages if
+                        isinstance(msg.get("content"), list) and any(
+                            isinstance(p, dict) and p.get("type") == "image_url"
+                            for p in msg["content"]))
+                    if current_img_msgs >= max_img_msgs:
+                        break
+                    used_images.update(imgs)
+                    normal_messages[ni]["content"] = self._message_content_for_prompt(item, include_images=True)
+
+            # 全局图片数量限制：从最旧的开始剥离图片直到不超限
+            img_msg_indices = []
+            for i, msg in enumerate(normal_messages):
+                content = msg.get("content")
+                if isinstance(content, list) and any(
+                    isinstance(item, dict) and item.get("type") == "image_url" for item in content
+                ):
+                    img_msg_indices.append(i)
+            excess = len(img_msg_indices) - max_img_msgs
+            for idx in img_msg_indices[:excess]:
+                msg = normal_messages[idx]
+                content = msg.get("content")
+                if isinstance(content, list):
+                    msg["content"] = [item for item in content if not (isinstance(item, dict) and item.get("type") == "image_url")]
+                    if not msg["content"]:
+                        msg["content"] = "[图片已省略]"
+
+        # 普通消息token预算检查
         while len(messages) > 2 and tg.cal_token_count(messages) > config.CONTEXT_TOKEN_BUDGET:
-            messages.pop(0)
+            # 优先从普通消息中删除
+            for i in range(len(messages)):
+                if messages[i].get("role") in {"user", "assistant"} and not messages[i].get("tool_calls"):
+                    del messages[i]
+                    break
+            else:
+                # 没有普通消息可删，删除第一条
+                messages.pop(0)
         return messages
 
     def _trim_messages_to_request_budget(self, messages: List[Dict[str, Any]]) -> None:
-        """智能截断：保留系统消息，优先删除非重要内容"""
+        """智能截断：保留系统消息，优先删除非重要内容，保护工具调用链完整性"""
         tg = TextGenerator.instance
         while len(messages) > 3 and tg.cal_token_count(messages) > config.CONTEXT_TOKEN_BUDGET:
             # 跳过前2条系统消息，从第3条开始找最早的消息删除
@@ -707,10 +1102,26 @@ class Chat:
             deleted = False
             for i in range(2, len(messages)):
                 msg = messages[i]
+                role = msg.get("role", "")
                 content = msg.get("content", "")
+                
                 # 跳过包含重要标记的消息
                 if isinstance(content, str) and any(marker in content for marker in ["[工具]", "[压缩上下文摘要]", "[历史记忆]"]):
                     continue
+                
+                # 检查是否是工具调用链的一部分
+                if role == "tool":
+                    # 检查前一条消息是否是对应的assistant tool_calls
+                    if i > 0 and messages[i-1].get("role") == "assistant" and messages[i-1].get("tool_calls"):
+                        # 跳过，保护工具调用链完整性
+                        continue
+                
+                if role == "assistant" and msg.get("tool_calls"):
+                    # 检查后一条消息是否是对应的tool结果
+                    if i + 1 < len(messages) and messages[i+1].get("role") == "tool":
+                        # 跳过，保护工具调用链完整性
+                        continue
+                
                 del messages[i]
                 deleted = True
                 break
@@ -730,7 +1141,6 @@ class Chat:
 
     def cleanup_after_bad_request(self, keep_history: int = 5) -> None:
         """清理最容易导致 400 的上下文，尤其是已过期的图片 URL。"""
-        self._chat_data.chat_image_history.clear()
         preset = self.chat_preset_dicts.get(self._preset_key)
         if preset:
             preset.prompt_messages = preset.prompt_messages[-keep_history:]
@@ -740,8 +1150,7 @@ class Chat:
         if config.DEBUG_LEVEL > 0:
             logger.warning(
                 f"[会话: {self.chat_key}] 已清理 400 后上下文: "
-                f"prompt_messages={len(preset.prompt_messages) if preset else 0}, "
-                f"image_history={len(self._chat_data.chat_image_history)}"
+                f"prompt_messages={len(preset.prompt_messages) if preset else 0}"
             )
     
     # endregion

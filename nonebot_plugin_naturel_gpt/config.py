@@ -24,13 +24,17 @@ class PresetConfig(BaseModel, extra=Extra.ignore):
 class Config(BaseModel, extra=Extra.ignore):
     """ng 配置数据，默认保存为 naturel_gpt_config.yml"""
     OPENAI_API_KEYS: List[str]
-    """OpenAI API Key 列表"""
+    """OpenAI API Key 列表（旧格式兼容）"""
     OPENAI_TIMEOUT: int
-    """OpenAI 请求超时时间"""
+    """OpenAI 请求超时时间（旧格式兼容）"""
     OPENAI_PROXY_SERVER: str
-    """请求OpenAI的代理服务器"""
+    """请求OpenAI的代理服务器（旧格式兼容）"""
     OPENAI_BASE_URL: str
-    """请求OpenAI的基础URL"""
+    """请求OpenAI的基础URL（旧格式兼容）"""
+    OPENAI_PROFILES: Dict[str, Dict[str, Any]] = {}
+    """多组 OpenAI 配置，每组包含 api_keys/base_url/proxy/timeout/model 等"""
+    OPENAI_ACTIVE_PROFILE: str = ""
+    """当前激活的配置名；为空时使用第一个 profile"""
     REPLY_THROTTLE_TIME: int
     """回复间隔节流时间"""
     PRESETS: Dict[str, PresetConfig] = {}
@@ -58,9 +62,15 @@ class Config(BaseModel, extra=Extra.ignore):
     CONTEXT_TOKEN_BUDGET: int
     """上下文窗口token预算，控制prompt最大token数"""
     CONTEXT_WINDOW_SIZE: int
-    """上下文窗口大小（消息条数），控制保留多少条最近对话"""
+    """上下文窗口大小（对话轮数），每轮=1条用户消息+1条回复"""
     CONTEXT_SUMMARY_ENABLED: bool
     """是否启用上下文摘要压缩，启用后超窗口的历史会被压缩为摘要"""
+    CONTEXT_COMPRESS_THRESHOLD_RATIO: float
+    """压缩触发阈值乘数，溢出超过窗口*此比例才触发摘要生成，默认0.5"""
+    TOOL_CONTEXT_TOKEN_BUDGET: int
+    """工具消息token预算，超出时全部抛弃"""
+    TOOL_CONTEXT_MODE: int
+    """工具上下文模式: 1=完整工具+思考, 2=仅思考, 3=仅工具调用摘要"""
 
     LLM_ENABLE_STREAM: bool
     """是否使用流式响应"""
@@ -80,9 +90,6 @@ class Config(BaseModel, extra=Extra.ignore):
 
     USER_MEMORY_SUMMARY_THRESHOLD: int
     """用户记忆阈值"""
-
-    CHAT_ENABLE_RECORD_ORTHER: bool
-    """是否记录其他人的对话"""
 
     NG_DATA_PICKLE: bool
     """是否强制使用pickle，默认使用json"""
@@ -135,12 +142,13 @@ class Config(BaseModel, extra=Extra.ignore):
 
     MULTIMODAL_ENABLE: bool
     """是否允许接收图片作为多模态输入"""
-    MULTIMODAL_HISTORY_LENGTH: int
-    """多模态聊天记录视野长度"""
     MULTIMODAL_MAX_MESSAGES_WITH_IMAGES: int
     """最多保留几条消息中的图片"""
     MULTIMODAL_IMAGE_FRESH_MINUTES: int
     """图片有效期（分钟），超过此时间的图片不再作为上下文"""
+
+    CONTEXT_BUFFER_SIZE: int
+    """非触发消息缓冲区大小（消息条数），同时控制图片视野窗口"""
 
     BOCHA_API_KEY: str
     BOCHA_API_BASE: str
@@ -149,9 +157,12 @@ class Config(BaseModel, extra=Extra.ignore):
     WEB_FETCH_MAX_CHARS: int
     PLAYWRIGHT_TIMEOUT: int
     LLM_TOOL_LOLICON_CONFIG: Dict[str, Any]
+    BANGUMI_ACCESS_TOKEN: str
 
     COMFYUI_BASE_URL: str
     """ComfyUI Anima 画图服务地址"""
+    COMFYUI_ENABLED: bool
+    """ComfyUI Anima 画图是否开启，持久化以便重启时自动恢复"""
 
     UNLOCK_CONTENT_LIMIT: bool
     """解锁内容限制"""
@@ -162,21 +173,6 @@ class Config(BaseModel, extra=Extra.ignore):
     NG_CHECK_USER_NAME_HYPHEN:bool # 如果用户名中包含连字符，ChatGPT会将前半部分识别为名字，但一般情况下后半部分才是我们想被称呼的名字, eg. 策划-李华
     """检查用户名中的连字符"""
 
-    ENABLE_MC_CONNECT: bool
-    """是否启用MC服务器连接"""
-
-    MC_COMMAND_PREFIX: List[str]
-    """MC服务器人格指令前缀"""
-
-    MC_RCON_HOST: str
-    """MC服务器RCON地址"""
-
-    MC_RCON_PORT: int
-    """MC服务器RCON端口"""
-
-    MC_RCON_PASSWORD: str
-    """MC服务器RCON密码"""
-
     VERSION:str
     """配置文件版本信息"""
     
@@ -185,13 +181,15 @@ class Config(BaseModel, extra=Extra.ignore):
 
 # 配置文件模板(把全部默认值写到Config定义里比较乱，因此保留此默认值对象,作为真实的默认值)
 CONFIG_TEMPLATE = {
-    "OPENAI_API_KEYS": [    # OpenAI API Key 列表
+    "OPENAI_API_KEYS": [    # OpenAI API Key 列表（旧格式兼容）
         'sk-xxxxxxxxxxxxx',
         'sk-xxxxxxxxxxxxx',
     ],
-    "OPENAI_TIMEOUT": 60,   # OpenAI 请求超时时间
-    'OPENAI_PROXY_SERVER': '',  # 请求OpenAI的代理服务器
-    'OPENAI_BASE_URL': 'https://api.openai.com/v1',      # 请求OpenAI的基础URL
+    "OPENAI_TIMEOUT": 60,   # OpenAI 请求超时时间（旧格式兼容）
+    'OPENAI_PROXY_SERVER': '',  # 请求OpenAI的代理服务器（旧格式兼容）
+    'OPENAI_BASE_URL': 'https://api.openai.com/v1',      # 请求OpenAI的基础URL（旧格式兼容）
+    'OPENAI_PROFILES': {},  # 多组 OpenAI 配置；为空时自动从旧格式扁平键创建 default profile
+    'OPENAI_ACTIVE_PROFILE': '',  # 当前激活的配置名；为空时使用第一个 profile
     "REPLY_THROTTLE_TIME": 3,   # 回复间隔节流时间
     "PRESETS": {},
     "DEFAULT_PERSONA": "",
@@ -205,9 +203,12 @@ CONFIG_TEMPLATE = {
 
     'CHAT_MAX_SUMMARY_TOKENS': 512,   # 单次总结最大token数
     'REPLY_MAX_TOKENS': 1024,   # 单次回复最大token数
-    'CONTEXT_TOKEN_BUDGET': 3072,  # 上下文窗口token预算
-    'CONTEXT_WINDOW_SIZE': 16,  # 上下文窗口大小（消息条数）
+    'CONTEXT_TOKEN_BUDGET': 4096,  # 上下文窗口token预算
+    'CONTEXT_WINDOW_SIZE': 16,  # 上下文窗口大小（对话轮数），每轮=1条用户消息+1条回复
     'CONTEXT_SUMMARY_ENABLED': False,  # 是否启用上下文摘要压缩
+    'CONTEXT_COMPRESS_THRESHOLD_RATIO': 0.5,  # 压缩触发阈值乘数，溢出超过窗口*此比例才触发摘要生成
+    'TOOL_CONTEXT_TOKEN_BUDGET': 8196,  # 工具消息token预算（含思考），超出时从旧到新逐组去除
+    'TOOL_CONTEXT_MODE': 3,  # 工具上下文模式: 1=完整工具+思考, 2=仅思考, 3=仅工具调用摘要
 
     'LLM_ENABLE_STREAM': True,
     'LLM_SHOW_REASONING': False,
@@ -219,8 +220,6 @@ CONFIG_TEMPLATE = {
     'REPLY_ON_WELCOME': True,       # 是否在新成员加入时回复
 
     'USER_MEMORY_SUMMARY_THRESHOLD': 12,  # 用户记忆阈值
-
-    'CHAT_ENABLE_RECORD_ORTHER': True,  # 是否记录其他人的对话
 
     'NG_DATA_PICKLE': False,  # 强制使用pickle
     'NG_DATA_PATH': "./data/naturel_gpt/",  # 数据文件目录
@@ -250,9 +249,10 @@ CONFIG_TEMPLATE = {
     'NG_ENABLE_AWAKE_IDENTITIES': True, # 是否允许自动唤醒其它人格
 
     'MULTIMODAL_ENABLE': True,
-    'MULTIMODAL_HISTORY_LENGTH': 4,
-    'MULTIMODAL_MAX_MESSAGES_WITH_IMAGES': 2,
-    'MULTIMODAL_IMAGE_FRESH_MINUTES': 30,
+    'MULTIMODAL_MAX_MESSAGES_WITH_IMAGES': 3,
+    'MULTIMODAL_IMAGE_FRESH_MINUTES': 120,
+
+    'CONTEXT_BUFFER_SIZE': 10,
 
     'BOCHA_API_KEY': '',
     'BOCHA_API_BASE': 'https://api.bochaai.com/v1/web-search',
@@ -266,19 +266,15 @@ CONFIG_TEMPLATE = {
         'pic_proxy': None,
         'exclude_ai': True,
     },
+    'BANGUMI_ACCESS_TOKEN': 'hDiBHapPYxnVbAgEGG2tZvI2hXyZmUl8VFWL2Ct7',
 
     'COMFYUI_BASE_URL': 'http://127.0.0.1:8188',
+    'COMFYUI_ENABLED': False,
 
     'UNLOCK_CONTENT_LIMIT': False,  # 解锁内容限制
 
     'GROUP_CARD':True,
-    'NG_CHECK_USER_NAME_HYPHEN': False, # 检查用户名中的连字符
-
-    'ENABLE_MC_CONNECT': False,  # 是否启用MC服务器
-    'MC_COMMAND_PREFIX': ['!', '！'],  # MC服务器指令前缀
-    'MC_RCON_HOST': '127.0.0.1',  # MC服务器RCON地址
-    'MC_RCON_PORT': 25575,  # MC服务器RCON端口
-    'MC_RCON_PASSWORD': '',  # MC服务器RCON密码
+    'NG_CHECK_USER_NAME_HYPHEN': False,  # 检查用户名中的连字符
 
     'VERSION':'1.0',
     'DEBUG_LEVEL': 0,  # debug level, [0, 1, 2], 0 为关闭，等级越高debug信息越详细
@@ -379,6 +375,26 @@ def _load_config_obj_from_file()->Config:
                     "is_only_private": False,
                     "bot_self_introl": "你是一个自然参与群聊的聊天助手。回复要简短、直接、像真实人类一样。",
                 }
+
+            # 向后兼容：如果没有 OPENAI_PROFILES，从旧格式扁平键自动创建 default profile
+            if not config_obj_from_file.get("OPENAI_PROFILES"):
+                config_obj_from_file["OPENAI_PROFILES"] = {
+                    "default": {
+                        "api_keys": config_obj_from_file.get("OPENAI_API_KEYS", []),
+                        "base_url": config_obj_from_file.get("OPENAI_BASE_URL", ""),
+                        "proxy": config_obj_from_file.get("OPENAI_PROXY_SERVER", ""),
+                        "timeout": config_obj_from_file.get("OPENAI_TIMEOUT", 60),
+                        "model": config_obj_from_file.get("CHAT_MODEL", ""),
+                        "model_mini": config_obj_from_file.get("CHAT_MODEL_MINI", ""),
+                        "temperature": config_obj_from_file.get("CHAT_TEMPERATURE", 0.6),
+                        "top_p": config_obj_from_file.get("CHAT_TOP_P", 0.95),
+                        "max_tokens": config_obj_from_file.get("REPLY_MAX_TOKENS", 4096),
+                        "max_summary_tokens": config_obj_from_file.get("CHAT_MAX_SUMMARY_TOKENS", 800),
+                        "frequency_penalty": config_obj_from_file.get("CHAT_FREQUENCY_PENALTY", 0.0),
+                        "presence_penalty": config_obj_from_file.get("CHAT_PRESENCE_PENALTY", 0.0),
+                    }
+                }
+                config_obj_from_file["OPENAI_ACTIVE_PROFILE"] = "default"
         except Exception as e:
             logger.error(f"Naturel GPT 配置文件读取失败，请检查配置文件填写是否符合yml文件格式规范，错误信息：{e}")
             raise e
