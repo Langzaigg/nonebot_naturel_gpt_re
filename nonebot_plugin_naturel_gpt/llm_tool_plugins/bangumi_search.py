@@ -5,6 +5,11 @@ import httpx
 # Bangumi API 配置
 BANGUMI_API_BASE = "https://api.bgm.tv"
 
+
+def should_load(config) -> bool:
+    """有非空 BANGUMI_ACCESS_TOKEN 时才加载。"""
+    return bool(getattr(config, "BANGUMI_ACCESS_TOKEN", None))
+
 # 条目类型映射
 SUBJECT_TYPE_MAP = {
     "book": 1,      # 书籍
@@ -144,6 +149,29 @@ search_person_schema = {
         },
     },
 }
+
+
+# 自动发现接口：导出工具列表
+# run 函数在文件末尾定义，这里用延迟引用
+def _get_run_functions():
+    from . import bangumi_search as _self
+    return {
+        "bangumi_search_subject": _self.run_search_subject,
+        "bangumi_get_subject": _self.run_get_subject,
+        "bangumi_search_character": _self.run_search_character,
+        "bangumi_search_person": _self.run_search_person,
+    }
+
+
+def get_tools():
+    """返回 (name, schema, run) 列表，供自动发现使用。"""
+    runs = _get_run_functions()
+    return [
+        ("bangumi_search_subject", search_subject_schema, runs["bangumi_search_subject"]),
+        ("bangumi_get_subject", get_subject_schema, runs["bangumi_get_subject"]),
+        ("bangumi_search_character", search_character_schema, runs["bangumi_search_character"]),
+        ("bangumi_search_person", search_person_schema, runs["bangumi_search_person"]),
+    ]
 
 
 # ============ API 请求 ============

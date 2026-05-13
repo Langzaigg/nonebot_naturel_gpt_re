@@ -4,6 +4,12 @@ import httpx
 
 from .common import clean_text
 
+
+def should_load(config) -> bool:
+    """有非空 BOCHA_API_KEY 时才加载。"""
+    return bool(getattr(config, "BOCHA_API_KEY", None))
+
+
 schema = {
     "type": "function",
     "function": {

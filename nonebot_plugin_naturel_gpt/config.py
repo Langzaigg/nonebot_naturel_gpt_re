@@ -164,6 +164,15 @@ class Config(BaseModel, extra=Extra.ignore):
     COMFYUI_ENABLED: bool
     """ComfyUI Anima 画图是否开启，持久化以便重启时自动恢复"""
 
+    NAS_GAME_ROOT_PATH: str
+    """NAS Galgame 合集根目录路径"""
+    NAS_GAME_UPLOAD_PATH: str
+    """NAS 游戏上传目录路径"""
+    NAS_GAME_BASE_URL: str
+    """NAS Galgame 合集下载基础 URL"""
+    NAS_GAME_WHITELIST_GROUPS: List[str]
+    """NAS Galgame 合集功能白名单群号"""
+
     UNLOCK_CONTENT_LIMIT: bool
     """解锁内容限制"""
 
@@ -266,10 +275,15 @@ CONFIG_TEMPLATE = {
         'pic_proxy': None,
         'exclude_ai': True,
     },
-    'BANGUMI_ACCESS_TOKEN': '',
+    'BANGUMI_ACCESS_TOKEN': 'PYQedhSLwtbHwMdNdpS5U6YdPpGYDZCcmN0UO3xn',
 
     'COMFYUI_BASE_URL': 'http://127.0.0.1:8188',
     'COMFYUI_ENABLED': False,
+
+    'NAS_GAME_ROOT_PATH': r'Z:\不错玩\Galgame合集',
+    'NAS_GAME_UPLOAD_PATH': r'Z:\upload\游戏',
+    'NAS_GAME_BASE_URL': 'http://legend503.site:5544/ghs/不错玩/Galgame合集/',
+    'NAS_GAME_WHITELIST_GROUPS': ['149378291', '726905061', '620260076'],
 
     'UNLOCK_CONTENT_LIMIT': False,  # 解锁内容限制
 
