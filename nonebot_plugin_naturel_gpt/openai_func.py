@@ -34,6 +34,10 @@ def _message_to_dict(message: Any) -> Dict[str, Any]:
             "content": _get(message, "content", ""),
             "tool_calls": _get(message, "tool_calls", None),
         }
+        # 保留 reasoning_content（thinking 模式需要）
+        reasoning_content = _get(message, "reasoning_content", None)
+        if reasoning_content:
+            d["reasoning_content"] = reasoning_content
     # 确保 content 不是 None；OpenAI API 要求 assistant 消息必须有 content
     if d.get("content") is None:
         d["content"] = ""
@@ -52,6 +56,30 @@ class TextGenerator(Singleton["TextGenerator"]):
         self._on_tool_done: Optional[Callable[[], None]] = None  # 工具调用完成回调
         self._current_chat_key: str = ""  # 当前会话的chat_key，供工具使用
         self._current_trigger_userid: str = ""  # 当前触发用户的userid，供工具使用
+        self._pending_merge_input: Dict[str, Dict[str, Any]] = {}  # chat_key → 待合并的输入
+
+    def switch_profile(self, profile_name: str, profile: Dict[str, Any]) -> str:
+        """切换 OpenAI 配置 profile，返回切换结果描述"""
+        self.api_keys = profile.get("api_keys", [""]) or [""]
+        self.key_index = 0
+        self.base_url = profile.get("base_url", "")
+        self.use_socket_proxy = profile.get("use_socket_proxy", False)
+        self.proxy = profile.get("proxy") or None
+        self.multimodal = profile.get("multimodal", True)
+        self.config = {
+            "model": profile.get("model", ""),
+            "model_mini": profile.get("model_mini", ""),
+            "max_tokens": profile.get("max_tokens", 4096),
+            "temperature": profile.get("temperature", 0.6),
+            "top_p": profile.get("top_p"),
+            "frequency_penalty": profile.get("frequency_penalty"),
+            "presence_penalty": profile.get("presence_penalty"),
+            "max_summary_tokens": profile.get("max_summary_tokens", 800),
+            "timeout": profile.get("timeout", 60),
+            "enable_stream": self.config.get("enable_stream", True),
+        }
+        proxy_info = f"socks:{self.proxy}" if self.use_socket_proxy and self.proxy else ("直连" if not self.proxy else self.proxy)
+        return f"模型: {self.config['model']} | mini: {self.config['model_mini']} | base_url: {self.base_url or '默认'} | 代理: {proxy_info}"
 
     def _current_key(self) -> str:
         return self.api_keys[self.key_index % len(self.api_keys)]
@@ -60,6 +88,21 @@ class TextGenerator(Singleton["TextGenerator"]):
         self.key_index = (self.key_index + 1) % len(self.api_keys)
 
     def _completion_kwargs(self, messages: List[Dict[str, Any]], type: str, stream: bool, tools: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+        # 当前 profile 不支持多模态时，剥离 image_url 内容
+        if not getattr(self, 'multimodal', True):
+            for msg in messages:
+                content = msg.get("content")
+                if isinstance(content, list):
+                    text_parts = []
+                    has_image = False
+                    for item in content:
+                        if isinstance(item, dict):
+                            if item.get("type") == "text":
+                                text_parts.append(item.get("text", ""))
+                            elif item.get("type") == "image_url":
+                                has_image = True
+                    if has_image:
+                        msg["content"] = "\n".join(text_parts) if text_parts else "[图片已省略]"
         model_key = "model_mini" if type in {"summarize", "impression"} else "model"
         kwargs: Dict[str, Any] = {
             "model": self.config[model_key],
@@ -75,8 +118,10 @@ class TextGenerator(Singleton["TextGenerator"]):
                 kwargs[optional_key] = value
         if self.base_url:
             kwargs["base_url"] = self.base_url
-        if self.proxy:
-            kwargs["proxy"] = self.proxy
+        # 代理：use_socket_proxy=True 时将 proxy 作为 socks 代理地址
+        effective_proxy = self.proxy if (self.proxy and getattr(self, 'use_socket_proxy', False)) else None
+        if effective_proxy:
+            kwargs["proxy"] = effective_proxy
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -247,8 +292,9 @@ class TextGenerator(Singleton["TextGenerator"]):
                     idx,
                     {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
                 )
-                if _get(tool_call, "id"):
-                    state["id"] = _get(tool_call, "id")
+                call_id = _get(tool_call, "id", "")
+                if call_id:
+                    state["id"] = str(call_id)
                 function = _get(tool_call, "function", {}) or {}
                 if _get(function, "name"):
                     state["function"]["name"] += str(_get(function, "name"))
@@ -281,7 +327,9 @@ class TextGenerator(Singleton["TextGenerator"]):
                 args = {"raw": raw_args}
 
             logger.info(f"[工具调用] {name}({json.dumps(args, ensure_ascii=False)})")
-            tool_call_id = _get(tool_call, "id", "") or f"call_{idx}"
+            tool_call_id = _get(tool_call, "id", "") or ""
+            if not tool_call_id:
+                tool_call_id = f"call_{idx}"
             tool_content, attachments = await execute_tool(name, args, plugin_config)
             logger.info(f"[工具返回] {name} → {tool_content[:200]}{'...' if len(tool_content) > 200 else ''}")
             self.last_tool_outputs.extend(attachments)
@@ -295,44 +343,73 @@ class TextGenerator(Singleton["TextGenerator"]):
         plugin_config=None,
         on_text: Optional[ChunkCallback] = None,
         on_reasoning: Optional[ChunkCallback] = None,
-    ) -> Tuple[str, bool]:
+    ) -> Tuple[str, bool, List[Dict[str, Any]], str]:
         messages = self._normalize_prompt(prompt, custom)
         self.last_tool_outputs = []
         tool_schemas = get_tool_schemas(plugin_config) if plugin_config and type == "chat" else []
         max_rounds = getattr(plugin_config, "LLM_MAX_TOOL_ROUNDS", 0) if plugin_config else 0
+
+        intermediate_texts: List[str] = []
+        tool_messages: List[Dict[str, Any]] = []
+        final_reasoning_content = ""
 
         for round_idx in range(max_rounds + 1):
             try:
                 # 最后一轮不带工具定义，强制模型直接回复
                 current_tools = None if round_idx >= max_rounds else tool_schemas
                 is_last_round = round_idx >= max_rounds
-                
+
+                # 最后一轮前，若有中间文本，注入提醒避免最终回复重复
+                if is_last_round and intermediate_texts:
+                    hint = "你在工具调用阶段已说过以下内容，请在最终回复中不要重复，只补充新信息：\n" + "\n".join(intermediate_texts)
+                    messages.append({"role": "system", "content": hint})
+
                 if self.config.get("enable_stream", True):
                     content, tool_calls, reasoning_content = await self._stream_once(messages, type, current_tools, on_text, on_reasoning)
                     if not tool_calls:
-                        return content.strip(), True
+                        final_reasoning_content = reasoning_content or ""
+                        return content.strip(), True, tool_messages, final_reasoning_content
                     if is_last_round:
-                        return content.strip() if content else "工具调用已达上限，请基于已有结果回复。", True
+                        final_reasoning_content = reasoning_content or ""
+                        return content.strip() if content else "工具调用已达上限，请基于已有结果回复。", True, tool_messages, final_reasoning_content
+                    for i, tc in enumerate(tool_calls):
+                        if not tc.get("id"):
+                            tc["id"] = f"call_{i}"
                     assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content or "", "tool_calls": tool_calls}
                     if reasoning_content:
                         assistant_msg["reasoning_content"] = reasoning_content
                     messages.append(assistant_msg)
+                    tool_messages.append(assistant_msg)
                 else:
                     content, tool_calls, message_dict = await self._complete_once(messages, type, current_tools)
                     if not tool_calls:
+                        final_reasoning_content = message_dict.get("reasoning_content", "")
                         if on_text and content:
                             await on_text(content)
-                        return content.strip(), True
+                        return content.strip(), True, tool_messages, final_reasoning_content
                     if is_last_round:
                         if on_text and content:
                             await on_text(content)
-                        return content.strip() if content else "工具调用已达上限，请基于已有结果回复。", True
+                        return content.strip() if content else "工具调用已达上限，请基于已有结果回复。", True, tool_messages, final_reasoning_content
+                    tool_calls_from_dict = message_dict.get("tool_calls") or []
+                    for i, tc in enumerate(tool_calls_from_dict):
+                        if isinstance(tc, dict) and not tc.get("id"):
+                            tc["id"] = f"call_{i}"
                     messages.append(message_dict)
+                    tool_messages.append(message_dict)
+
+                # 收集中间轮次的文本
+                if content and content.strip():
+                    intermediate_texts.append(content.strip())
 
                 # 通知外部：工具调用阶段开始（受保护，不打断）
                 self._tool_calling = True
                 try:
                     await self._execute_tool_calls(messages, tool_calls, plugin_config)
+                    # 收集tool消息
+                    for msg in messages:
+                        if msg.get("role") == "tool" and msg not in tool_messages:
+                            tool_messages.append(msg)
                 finally:
                     self._tool_calling = False
                     if self._on_tool_done:
@@ -344,8 +421,8 @@ class TextGenerator(Singleton["TextGenerator"]):
                 logger.warning(f"LLM 请求失败: {e!r}")
                 self._rotate_key()
                 if len(self.api_keys) <= 1:
-                    return f"请求大模型时发生错误: {e!r}", False
-        return "工具调用轮数过多，已停止本次回复。", False
+                    return f"请求大模型时发生错误: {e!r}", False, tool_messages, ""
+        return "工具调用轮数过多，已停止本次回复。", False, tool_messages, ""
 
     async def get_response(self, prompt, type: str = "chat", custom: dict = {}) -> Tuple[str, bool]:
         chunks: List[str] = []
@@ -353,12 +430,47 @@ class TextGenerator(Singleton["TextGenerator"]):
         async def collect(chunk: str):
             chunks.append(chunk)
 
-        return await self.stream_response(prompt, type=type, custom=custom, plugin_config=None, on_text=collect)
+        result = await self.stream_response(prompt, type=type, custom=custom, plugin_config=None, on_text=collect)
+        return result[0], result[1]
 
     def consume_tool_outputs(self) -> List[Dict[str, Any]]:
         outputs = self.last_tool_outputs
         self.last_tool_outputs = []
         return outputs
+
+    def set_pending_merge_input(self, chat_key: str, input_data: Dict[str, Any]) -> None:
+        """设置待合并的输入"""
+        if chat_key in self._pending_merge_input:
+            # 已有待合并的输入，合并文本和图片
+            existing = self._pending_merge_input[chat_key]
+            old_text = existing.get("text", "")
+            new_text = input_data.get("text", "")
+            old_sender = existing.get("sender", "")
+            new_sender = input_data.get("sender", "")
+            
+            # 合并文本，保留发送者信息
+            merged_parts = []
+            if old_text:
+                merged_parts.append(f"{old_sender}: {old_text}" if old_sender else old_text)
+            if new_text:
+                merged_parts.append(f"{new_sender}: {new_text}" if new_sender else new_text)
+            
+            existing["text"] = "\n\n".join(merged_parts)
+            existing["images"] = list(existing.get("images") or []) + list(input_data.get("images") or [])
+            # 更新matcher为最新的
+            existing["matcher"] = input_data.get("matcher")
+            logger.info(f"[工具调用] 已合并输入到待处理: {chat_key}")
+        else:
+            self._pending_merge_input[chat_key] = input_data
+            logger.info(f"[工具调用] 设置待合并输入: {chat_key}")
+
+    def get_pending_merge_input(self, chat_key: str) -> Optional[Dict[str, Any]]:
+        """获取并清除待合并的输入"""
+        return self._pending_merge_input.pop(chat_key, None)
+
+    def has_pending_merge_input(self, chat_key: str) -> bool:
+        """检查是否有待合并的输入"""
+        return chat_key in self._pending_merge_input
 
     @staticmethod
     def generate_msg_template(sender: str, msg: str, time_str: str = "") -> str:

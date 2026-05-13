@@ -4,6 +4,12 @@ from .browse_url import schema as browse_url_schema, run as run_browse_url
 from .fetch_url import schema as fetch_url_schema, run as run_fetch_url
 from .pixiv_search import schema as pixiv_search_schema, run as run_pixiv_search
 from .memory import schema as memory_schema, run as run_memory
+from .bangumi_search import (
+    search_subject_schema, get_subject_schema,
+    search_character_schema, search_person_schema,
+    run_search_subject, run_get_subject,
+    run_search_character, run_search_person,
+)
 from . import anima_generate
 
 TOOL_REGISTRY: dict = {
@@ -11,6 +17,10 @@ TOOL_REGISTRY: dict = {
     "fetch_url": (fetch_url_schema, run_fetch_url),
     "browse_url": (browse_url_schema, run_browse_url),
     "remember": (memory_schema, run_memory),
+    "bangumi_search_subject": (search_subject_schema, run_search_subject),
+    "bangumi_get_subject": (get_subject_schema, run_get_subject),
+    "bangumi_search_character": (search_character_schema, run_search_character),
+    "bangumi_search_person": (search_person_schema, run_search_person),
 }
 
 

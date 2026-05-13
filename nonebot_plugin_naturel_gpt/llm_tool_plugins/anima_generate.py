@@ -13,9 +13,6 @@ _anima_knowledge_cache: Optional[str] = None
 # 内存级会话开关：只记录哪些 chat_key 启用了 Anima 画图
 _chat_enabled: set = set()
 
-# 内存级高精度模式：只记录哪些 chat_key 启用了 fine 模式
-_chat_fine_mode: set = set()
-
 # 发送上下文：asyncio.Task → {chat_key, bot_id, group_id, user_id}
 # 由 matcher 在发起 LLM 请求前注册，后台任务完成后用于直接发送图片
 # 使用 Task 作为 key 是因为：不同群的请求并行运行在不同 Task 中，
@@ -42,17 +39,6 @@ def set_chat_enabled(chat_key: str, enabled: bool) -> None:
 
 def is_chat_enabled(chat_key: str) -> bool:
     return chat_key in _chat_enabled
-
-
-def set_chat_fine_mode(chat_key: str, enabled: bool) -> None:
-    if enabled:
-        _chat_fine_mode.add(chat_key)
-    else:
-        _chat_fine_mode.discard(chat_key)
-
-
-def is_chat_fine_mode(chat_key: str) -> bool:
-    return chat_key in _chat_fine_mode
 
 
 def any_chat_enabled() -> bool:
@@ -120,8 +106,11 @@ def fetch_schema_and_knowledge_sync() -> Tuple[bool, str]:
             parts.append(f"## {k}\n{v}\n")
         parts.append(
             "## 角色扮演引导\n"
-            "上述是你自己的绘画技巧。用户请你画画时，自然地用第一人称说你正在画什么，"
-            "避免提及工具、系统、调用等词。"
+            "上述是你自己的绘画技巧。用户请你画画时，你必须调用画图工具来实际创作，"
+            "不能只用文字描述而不调用工具。调用工具后，用第一人称自然地向用户描述你正在画什么，"
+            "避免提及工具、系统、调用等词。\n"
+            "如果你对要画的对象不够熟悉（如特定角色、场景、物品的外观细节不确定），"
+            "应先调用博查搜索工具查找参考资料，确认外观特征后再调用画图工具。"
         )
         _anima_knowledge_cache = "\n".join(parts)
 
@@ -154,20 +143,6 @@ async def _request(path: str, method: str = "GET", json: Optional[Dict] = None, 
         resp.raise_for_status()
         return resp.json()
 
-
-async def _download_bytes(url: str) -> bytes:
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.get(url)
-        resp.raise_for_status()
-        return resp.content
-
-
-async def _upload_to_comfyui_input(data: bytes, filename: str) -> str:
-    url = _get_url("/upload/image")
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(url, files={"image": (filename, data)}, data={"type": "input"})
-        resp.raise_for_status()
-        return resp.json().get("name", filename)
 
 
 def _build_positive(args: Dict[str, Any]) -> str:
@@ -203,7 +178,8 @@ def _enhance_schema(schema_data: Dict[str, Any]) -> Dict[str, Any]:
     data = dict(schema_data)
     original_desc = data.get("description", "")
     data["description"] = (
-        "使用你自己的绘画能力创作插画。这是你自己的画师技能，不是外部工具。"
+        "你的画师技能。用户请你画画时，你必须调用此工具来实际作画，仅描述画面而不调用工具等于没有画画。"
+        "调用后你会返回作画描述，系统会在后台生成图片并自动发送。"
         + (f" 技术说明: {original_desc}" if original_desc else "")
     )
     return data
@@ -220,20 +196,12 @@ async def run(args: Dict[str, Any], config) -> Tuple[str, List[Dict[str, Any]]]:
     current_task = asyncio.current_task()
     send_ctx = dict(_send_context.get(current_task, {}))  # 浅拷贝
 
-    # 检查是否启用 fine 模式（已关闭）
-    # chat_key = send_ctx.get("chat_key")
-    # use_fine = chat_key and is_chat_fine_mode(chat_key)
-    # if use_fine:
-    #     args["mode"] = "fine"
-    #     logger.info(f"[Anima] fine 模式已启用 (chat_key={chat_key})，将使用 fine 工作流")
-    use_fine = False
-
     positive_desc = _build_positive(args)
     # 返回给 LLM，引导其以第一人称描述自己在画画
-    mode_label = "精细" if use_fine else ""
     content = (
-        f"你正在画一幅{mode_label}插画：{positive_desc}。"
+        f"你正在画一幅插画：{positive_desc}。"
         f"用第一人称向用户描述你的创作，不要提到工具或系统，只说你自己在画画。"
+        f"并告知用户大约1分钟后画完，届时系统会自动发送。"
     )
 
     # 启动后台任务，传入上下文快照以便完成后发送
@@ -243,100 +211,39 @@ async def run(args: Dict[str, Any], config) -> Tuple[str, List[Dict[str, Any]]]:
 
 
 async def _do_generate(args: Dict[str, Any], config, send_ctx: Optional[Dict[str, Any]] = None, timeout: int = 600) -> None:
-    """后台执行生成，完成后通过 OneBot 直接发送图片。fine 模式分两阶段发送。"""
+    """后台执行生成，完成后通过 OneBot 直接发送图片。"""
     try:
-        use_fine = args.get("mode") == "fine"
+        data = await _request("/anima/generate", method="POST", json=args, timeout=timeout)
+        if not data.get("success"):
+            logger.warning(f"Anima 后台生成失败: {data}")
+            return
 
-        if use_fine:
-            # 阶段 1：快速出图
-            stage1_args = {k: v for k, v in args.items() if k != "mode"}
-            data1 = await _request("/anima/generate", method="POST", json=stage1_args, timeout=timeout)
-            if not data1.get("success"):
-                logger.warning(f"Anima 阶段 1 生成失败: {data1}")
-                return
+        images = data.get("images", [])
+        if not images:
+            logger.warning("Anima 后台生成成功但未返回图片")
+            return
 
-            images1 = data1.get("images", [])
-            if not images1:
-                logger.warning("Anima 阶段 1 生成成功但未返回图片")
-                return
+        prompt_text = data.get("positive", "")
+        seed = data.get("seed")
+        logger.info(f"Anima 图片生成完成: {len(images)} 张 seed={seed}")
 
-            # 发送阶段 1 图片
-            stage1_filename = None
-            stage1_url = None
-            for img in images1:
-                image_url = img.get("view_url") or img.get("url")
-                if image_url:
-                    await _send_image_with_ctx(send_ctx, image_url, data1.get("positive", ""))
-                    if stage1_filename is None:
-                        stage1_filename = img.get("filename")
-                        stage1_url = image_url
-
-            if not stage1_filename or not stage1_url:
-                logger.warning("Anima 阶段 1 未获取到有效图片")
-                return
-
-            # 将阶段 1 图片上传到 ComfyUI input 目录，供 refine 工作流加载
-            try:
-                img_bytes = await _download_bytes(stage1_url)
-                uploaded_name = await _upload_to_comfyui_input(img_bytes, stage1_filename)
-                logger.info(f"Anima 阶段 1 图片已上传至 input: {uploaded_name}")
-            except Exception as e:
-                logger.warning(f"Anima 阶段 1 图片上传失败，无法继续细化: {e}")
-                return
-
-            # 阶段 2：细化
-            refine_args = {k: v for k, v in args.items() if k != "mode"}
-            refine_args["refine_from"] = uploaded_name
-            data2 = await _request("/anima/generate", method="POST", json=refine_args, timeout=timeout)
-            if not data2.get("success"):
-                logger.warning(f"Anima 阶段 2 细化失败: {data2}")
-                return
-
-            images2 = data2.get("images", [])
-            if not images2:
-                logger.warning("Anima 阶段 2 细化成功但未返回图片")
-                return
-
-            # 发送阶段 2 图片
-            for img in images2:
-                image_url = img.get("view_url") or img.get("url")
-                if image_url:
-                    await _send_image_with_ctx(send_ctx, image_url, data2.get("positive", ""))
-
-            logger.info(f"Anima fine 模式完成: 阶段1={stage1_filename}, 阶段2={images2[0].get('filename')}")
-        else:
-            # fast 模式：单次调用
-            data = await _request("/anima/generate", method="POST", json=args, timeout=timeout)
-            if not data.get("success"):
-                logger.warning(f"Anima 后台生成失败: {data}")
-                return
-
-            images = data.get("images", [])
-            if not images:
-                logger.warning("Anima 后台生成成功但未返回图片")
-                return
-
-            prompt_text = data.get("positive", "")
-            seed = data.get("seed")
-            logger.info(f"Anima 图片生成完成: {len(images)} 张 seed={seed}")
-
-            for i, img in enumerate(images):
-                image_url = img.get("view_url") or img.get("url")
-                if not image_url:
-                    continue
-                sent = await _send_image_with_ctx(send_ctx, image_url, prompt_text)
-                if not sent:
-                    _pending_results.append({
-                        "type": "image",
-                        "url": image_url,
-                        "filename": img.get("filename"),
-                        "prompt": prompt_text,
-                        "seed": seed,
-                        "width": data.get("width"),
-                        "height": data.get("height"),
-                        "chat_key": send_ctx.get("chat_key") if send_ctx else None,
-                    })
-                    logger.warning(f"Anima 图片 {i+1} 直接发送失败，已存入 pending 队列等待兜底消费")
+        for i, img in enumerate(images):
+            image_url = img.get("view_url") or img.get("url")
+            if not image_url:
+                continue
+            sent = await _send_image_with_ctx(send_ctx, image_url, prompt_text)
+            if not sent:
+                _pending_results.append({
+                    "type": "image",
+                    "url": image_url,
+                    "filename": img.get("filename"),
+                    "prompt": prompt_text,
+                    "seed": seed,
+                    "width": data.get("width"),
+                    "height": data.get("height"),
+                    "chat_key": send_ctx.get("chat_key") if send_ctx else None,
+                })
+                logger.warning(f"Anima 图片 {i+1} 直接发送失败，已存入 pending 队列等待兜底消费")
     except Exception as e:
         logger.exception("Anima 后台生成任务失败")
 

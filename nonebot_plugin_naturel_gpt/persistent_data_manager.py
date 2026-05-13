@@ -43,22 +43,34 @@ class ChatMessageData(StoreSerializable):
     text: str = field(default="")
     images: List[str] = field(default_factory=list)
     content_is_labeled: bool = field(default=False)
+    context_only: bool = field(default=False)
     timestamp: float = field(default=0.0)
     triggered: bool = field(default=False)
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    tool_call_id: str = field(default="")
+    tool_name: str = field(default="")
+    reasoning_content: str = field(default="")
+    tool_call_summary: str = field(default="")
 
     @override
     def _init_from_dict(self, self_dict: Dict[str, Any]) -> Self:
         super()._init_from_dict(self_dict)
-        self.role = self.role if self.role in {"user", "assistant"} else "user"
+        self.role = self.role if self.role in {"user", "assistant", "tool"} else "user"
         self.sender = str(getattr(self, "sender", "") or "")
         self.text = str(getattr(self, "text", "") or "")
         self.images = list(getattr(self, "images", []) or [])
         self.content_is_labeled = bool(getattr(self, "content_is_labeled", False))
+        self.context_only = bool(getattr(self, "context_only", False))
         try:
             self.timestamp = float(getattr(self, "timestamp", 0.0) or 0.0)
         except (TypeError, ValueError):
             self.timestamp = 0.0
         self.triggered = bool(getattr(self, "triggered", False))
+        self.tool_calls = list(getattr(self, "tool_calls", []) or [])
+        self.tool_call_id = str(getattr(self, "tool_call_id", "") or "")
+        self.tool_name = str(getattr(self, "tool_name", "") or "")
+        self.reasoning_content = str(getattr(self, "reasoning_content", "") or "")
+        self.tool_call_summary = str(getattr(self, "tool_call_summary", "") or "")
         return self
 
 
@@ -76,6 +88,7 @@ class PresetData(StoreSerializable):
     chat_memory: Dict[str, str] = field(default_factory=dict)  # 群记忆
     user_memories: Dict[str, Dict[str, str]] = field(default_factory=dict)  # 用户个人记忆: {user_id: {key: value}}
     context_summary: str = field(default="")
+    tool_call_summary: str = field(default="")  # 模式3: 最近一次工具调用的摘要
     prompt_messages: List[ChatMessageData] = field(default_factory=list)
 
     @classmethod
@@ -98,9 +111,8 @@ class PresetData(StoreSerializable):
             self.is_only_private = False
 
         self.chat_impressions.clear()
-        self.chat_memory.clear()
-        self.user_memories.clear()
         self.context_summary = ""
+        self.tool_call_summary = ""
         self.prompt_messages.clear()
 
     @override
@@ -121,6 +133,7 @@ class PresetData(StoreSerializable):
                 self.user_memories[str(uid)] = {str(k): str(v) for k, v in memories.items() if v}
         
         self.context_summary = str(getattr(self, "context_summary", "") or "")
+        self.tool_call_summary = str(getattr(self, "tool_call_summary", "") or "")
 
         raw_impressions = getattr(self, "chat_impressions", {}) or {}
         self.chat_impressions = {
@@ -137,6 +150,19 @@ class PresetData(StoreSerializable):
         ]
         return self
 
+    @override
+    def _serializable(self) -> Dict[str, Any]:
+        """序列化时过滤掉工具消息和思考内容"""
+        rtn = super()._serializable()
+        # 过滤prompt_messages中的工具消息和思考内容
+        if "prompt_messages" in rtn:
+            rtn["prompt_messages"] = [
+                msg._serializable() if isinstance(msg, ChatMessageData) else msg
+                for msg in rtn["prompt_messages"]
+                if isinstance(msg, ChatMessageData) and msg.role in {"user", "assistant"} and not msg.tool_calls
+            ]
+        return rtn
+
 
 @dataclass
 class ChatData(StoreSerializable):
@@ -146,6 +172,7 @@ class ChatData(StoreSerializable):
     is_enable: bool = field(default=True)
     enable_auto_switch_identity: bool = field(default=config.NG_ENABLE_AWAKE_IDENTITIES)
     active_preset: str = field(default="")
+    active_profile: str = field(default="")  # 当前会话使用的 OpenAI profile
     preset_datas: Dict[str, PresetData] = field(default_factory=dict)
     next_message_index: int = field(default=0)
     chat_image_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -165,6 +192,7 @@ class ChatData(StoreSerializable):
             getattr(self, "enable_auto_switch_identity", config.NG_ENABLE_AWAKE_IDENTITIES)
         )
         self.active_preset = str(getattr(self, "active_preset", "") or "")
+        self.active_profile = str(getattr(self, "active_profile", "") or "")
 
         raw_presets = getattr(self, "preset_datas", {}) or {}
         self.preset_datas = {

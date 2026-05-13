@@ -8,7 +8,7 @@ schema = {
     "type": "function",
     "function": {
         "name": "bocha_search",
-        "description": "Search the web ONLY when the user explicitly asks about recent news, real-time events, or facts you are clearly unsure about.",
+        "description": "网页搜索工具。当你对用户的问题不确定、不了解、或涉及实时信息（新闻、天气、股价等）时，应主动使用此工具搜索以给出准确回答。不要猜测不确定的事实，优先搜索验证。",
         "parameters": {
             "type": "object",
             "properties": {
