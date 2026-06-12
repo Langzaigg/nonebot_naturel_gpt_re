@@ -1,242 +1,211 @@
-# nonebot_plugin_naturel_gpt
+# Naturel GPT 插件
 
-基于 NoneBot2 + OneBot v11 的群聊人格聊天插件。支持流式响应、多模态图片输入、原生工具调用、动态人格加载和 `rg` 指令切换人格。
+基于 NoneBot2 + OneBot v11 的群聊人格聊天插件，支持流式响应、多模态图片输入、原生工具调用和动态人格加载。
+
+## 功能特性
+
+- **多模型支持**：通过 OpenAI-compatible API 调用各种大模型
+- **流式响应**：实时生成并分段发送回复
+- **多模态输入**：支持图片消息，可识别图片内容
+- **工具调用**：原生工具调用，支持搜索、网页抓取、Pixiv 搜索等
+- **动态人格**：支持 Markdown 文件和 Skill 文件夹两种人格格式
+- **记忆系统**：群记忆和用户记忆，支持记忆整理
+- **上下文管理**：智能上下文压缩和摘要生成
+- **ComfyUI 画图**：集成 Anima 画图工具
 
 ## 目录结构
 
-```text
-naturel_gpt/
-├── nonebot_plugin_naturel_gpt/     # NoneBot2 插件
-│   ├── llm_tool_plugins/           # 内置 LLM 工具
-│   ├── MCrcon/                     # Minecraft RCON 集成
-│   ├── res/                        # 文生图资源
-│   └── *.py                        # 插件核心代码
-├── comfyui_plugin/                 # ComfyUI AnimaTool 画图插件
-│   ├── executor/                   # 执行器
-│   ├── knowledge/                  # 知识库
-│   ├── schemas/                    # Schema 定义
-│   ├── servers/                    # 服务端
-│   └── ...
-├── examples/                       # 配置示例
-└── README.md
 ```
+nonebot_plugin_naturel_gpt/
+├── __init__.py              # 插件入口
+├── matcher.py               # 消息匹配和处理
+├── chat.py                  # 会话管理
+├── chat_history.py          # 对话历史管理
+├── chat_memory.py           # 记忆管理
+├── chat_prompt.py           # Prompt 构造
+├── chat_summary.py          # 摘要生成
+├── config.py                # 配置管理
+├── openai_func.py           # LLM 调用
+├── llm_tools.py             # 工具管理
+├── llm_tool_plugins/        # 工具插件目录
+│   ├── anima_generate.py    # ComfyUI 画图
+│   ├── bocha_search.py      # 博查搜索
+│   ├── browse_url.py        # 浏览器抓取
+│   ├── fetch_url.py         # HTTP 抓取
+│   ├── memory.py            # 记忆工具
+│   ├── pixiv_search.py      # Pixiv 搜索
+│   └── tavily_search.py     # Tavily 搜索
+├── image_cache.py           # 图片缓存
+├── persistent_data_manager.py # 持久化数据管理
+├── command_func.py          # 指令处理
+├── persona_loader.py        # 人格加载
+├── draw_db.py               # 绘图数据库
+└── utils.py                 # 工具函数
 
-## 内置工具
+config/
+├── naturel_gpt_config.yml   # 主配置文件
+└── personas/                # 人格目录
+    ├── SOUL.md              # 简易人格示例
+    └── 宫子-skill-main/     # Skill 人格示例
+        ├── SKILL.md
+        ├── soul.md
+        ├── limit.md
+        └── resource/
 
-| 工具 | 说明 | 配置项 |
-|------|------|--------|
-| `pixiv_search` | Pixiv 搜图（Lolicon API） | `LLM_TOOL_LOLICON_CONFIG` |
-| `fetch_url` | HTTP 轻量抓取网页文本 | `WEB_FETCH_TIMEOUT` / `WEB_FETCH_MAX_CHARS` |
-| `browse_url` | Playwright 浏览器渲染抓取 | `PLAYWRIGHT_TIMEOUT` |
-| `bocha_search` | 博查联网搜索 | `BOCHA_API_KEY` / `BOCHA_SEARCH_COUNT` |
-| `remember` | 记忆工具（群记忆/用户记忆） | `MEMORY_ACTIVE` / `MEMORY_MAX_LENGTH` |
-| `generate_anima_image` | ComfyUI Anima 画图 | `COMFYUI_BASE_URL`（通过 `rg draw on` 启用） |
-
-### 记忆工具
-
-支持两种 scope：
-- `group`：群记忆，所有人共享，注入到 `[群记忆]`
-- `user`：用户记忆，仅对该用户有效，注入到 `[你的记忆]`
-
-记忆与人格关联，每个人格有独立记忆空间。LLM 会在对话中自然识别重要信息并主动记住，对用户透明。
-
-### ComfyUI 画图工具
-
-通过 `rg draw on` 命令启用。需要先部署 ComfyUI 服务和 AnimaTool 插件。
-
-详见 [comfyui_plugin/README.md](comfyui_plugin/README.md)
+comfyui_plugin/              # ComfyUI AnimaTool
+├── executor/                # 执行器
+└── servers/                 # 服务器
+```
 
 ## 快速开始
 
-### 1. 部署 NoneBot2
-
-```bash
-# 安装 NoneBot2
-pip install nonebot2 nonebot-adapter-onebot
-
-# 创建项目
-nb create
-```
-
-### 2. 安装插件依赖
+### 1. 安装依赖
 
 ```bash
 pip install httpx tiktoken playwright
-playwright install chromium  # 如需 browse_url 工具
+playwright install chromium  # 可选，用于 browse_url 工具
 ```
 
-### 3. 放置插件
+### 2. 配置文件
 
-将 `nonebot_plugin_naturel_gpt/` 复制到 NoneBot2 项目的插件目录下。
-
-### 4. 配置
-
-在 NoneBot2 全局配置中指定插件配置路径：
+复制 `config/naturel_gpt_config.yml.example` 为 `config/naturel_gpt_config.yml`，并填入你的配置：
 
 ```yaml
-# .env.prod 或 bot.py
-ng_config_path: config/naturel_gpt_config.yml
+OPENAI_PROFILES:
+  default:
+    api_keys:
+      - sk-your-api-key-here
+    base_url: https://api.openai.com/v1
+    model: gpt-4o
 ```
 
-创建配置文件 `config/naturel_gpt_config.yml`：
+### 3. 配置人格
 
-```yaml
-# LLM 配置
-OPENAI_API_KEYS:
-  - sk-your-api-key
-OPENAI_BASE_URL: https://api.openai.com/v1
-OPENAI_TIMEOUT: 60
-CHAT_MODEL: gpt-4o
-CHAT_MODEL_MINI: gpt-4o-mini
+将人格文件放入 `config/personas/` 目录：
 
-# 上下文管理
-CONTEXT_TOKEN_BUDGET: 32768
-CONTEXT_WINDOW_SIZE: 20
-CONTEXT_SUMMARY_ENABLED: true
+- **简易人格**：创建 `.md` 文件，文件名即人格名
+- **Skill 人格**创建文件夹，格式为 `人格名-skill-main/`
 
-# 工具调用
-LLM_ENABLE_TOOLS: true
-LLM_MAX_TOOL_ROUNDS: 7
-
-# 博查搜索（可选）
-BOCHA_API_KEY: your-bocha-api-key
-BOCHA_SEARCH_COUNT: 10
-
-# ComfyUI 画图（可选）
-COMFYUI_BASE_URL: http://127.0.0.1:8188
-```
-
-### 5. 添加人格
-
-创建 `config/personas/` 目录，添加人格文件：
-
-```bash
-mkdir config/personas
-```
-
-支持两种格式：
-- **单文件人格**：`config/personas/兔酱.md`（文件名即人格名）
-- **Skill 文件夹**：`config/personas/兔酱-skill/SKILL.md`（文件夹名第一个 `-` 前的部分即人格名）
-
-### 6. 启动
+### 4. 启动插件
 
 ```bash
 nb run
 ```
 
-## 部署 ComfyUI 画图（可选）
+## 人格系统
 
-### 1. 部署 ComfyUI
+### 简易人格
 
-```bash
-# 克隆 ComfyUI
-git clone https://github.com/comfyanonymous/ComfyUI.git
-cd ComfyUI
+创建一个 `.md` 文件，内容即为系统提示词：
 
-# 安装依赖
-pip install -r requirements.txt
+```markdown
+# SOUL
+
+你是一个活泼可爱的群聊 AI 助手...
 ```
 
-### 2. 安装 AnimaTool 插件
+文件名为 `SOUL.md`，则人格名为 `SOUL`。
 
-将 `comfyui_plugin/` 复制到 ComfyUI 的 `custom_nodes/` 目录下：
+### Skill 人格
 
-```bash
-cp -r comfyui_plugin/ ComfyUI/custom_nodes/ComfyUI-AnimaTool
+创建一个文件夹，格式为 `人格名-skill-main/`，包含以下文件：
+
+- `SKILL.md`：角色设定（必需）
+- `soul.md`：灵魂设定
+- `limit.md`：限制设定
+- `resource/behavior_guide.md`：行为指南
+- `resource/key_life_events.md`：重要事件
+- `resource/relationship_dynamics.md`：人际关系
+- `resource/speech_patterns.md`：说话模式
+
+### 人格生成器
+
+使用 [GalgameCharacterSkills](https://github.com/Langzaigg/GalgameCharacterSkills) 生成器可以快速创建高质量的 Skill 人格。
+
+## 指令说明
+
+- `rg` 或 `rg list`：查看可用人格列表
+- `rg set <人格名>`：切换到指定人格
+- `rg reset`：重置当前会话上下文
+- `rg mem`：查看记忆
+- `rg mem clear <scope>`：清除记忆
+- `rg model`：查看/切换模型配置
+- `rg draw [force/on/auto/off]`：画图模式设置
+
+## 工具说明
+
+### 内置工具
+
+- **tavily_search**：Tavily 网页搜索（主搜索工具）
+- **bocha_search**：博查网页搜索（备用）
+- **fetch_url**：HTTP 网页抓取
+- **browse_url**：浏览器渲染抓取
+- **pixiv_search**：Pixiv 图片搜索
+- **memory**：记忆管理工具
+- **anima_generate**：ComfyUI 画图工具
+
+### 工具配置
+
+在配置文件中设置相关参数：
+
+```yaml
+# 搜索工具
+TAVILY_API_KEY: []
+BOCHA_API_KEY: ''
+
+# 网页抓取
+WEB_FETCH_TIMEOUT: 20
+WEB_FETCH_MAX_CHARS: 6000
+
+# Pixiv 搜索
+LLM_TOOL_LOLICON_CONFIG:
+  proxy: null
+  r18: 0
+
+# ComfyUI 画图
+COMFYUI_BASE_URL: http://127.0.0.1:8188
 ```
 
-安装插件依赖：
+## 配置说明
 
-```bash
-cd ComfyUI/custom_nodes/ComfyUI-AnimaTool
-pip install -r requirements.txt
+### OpenAI 配置
+
+```yaml
+OPENAI_PROFILES:
+  default:
+    api_keys:
+      - sk-xxx
+    base_url: https://api.openai.com/v1
+    proxy: ''
+    timeout: 60
+    model: gpt-4o
+    model_mini: gpt-4o-mini
+    temperature: 0.4
+    max_tokens: 1024
+    multimodal: true
 ```
-
-### 3. 启动 ComfyUI
-
-```bash
-cd ComfyUI
-python main.py --listen 0.0.0.0 --port 8188
-```
-
-### 4. 在 NoneBot2 中启用
-
-发送指令：
-
-```
-rg draw on
-```
-
-这会：
-1. 检查 ComfyUI 连接
-2. 拉取画图 Schema 和知识库
-3. 注册画图工具
-
-## 配置参考
-
-### LLM 配置
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `OPENAI_API_KEYS` | API Key 列表（支持轮换） | - |
-| `OPENAI_BASE_URL` | API 基础 URL | `https://api.openai.com/v1` |
-| `OPENAI_TIMEOUT` | 请求超时（秒） | `60` |
-| `CHAT_MODEL` | 聊天模型 | `gpt-4o` |
-| `CHAT_MODEL_MINI` | 轻量模型（摘要用） | `gpt-4o-mini` |
-| `CHAT_TEMPERATURE` | 温度 | `0.4` |
 
 ### 上下文管理
 
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `CONTEXT_TOKEN_BUDGET` | 上下文 token 预算 | `3072` |
-| `CONTEXT_WINDOW_SIZE` | 滑动窗口大小（消息条数） | `16` |
-| `CONTEXT_SUMMARY_ENABLED` | 启用摘要压缩 | `false` |
-
-### 多模态
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `MULTIMODAL_ENABLE` | 启用图片输入 | `true` |
-| `MULTIMODAL_HISTORY_LENGTH` | 图片历史视野 | `4` |
-| `MULTIMODAL_MAX_MESSAGES_WITH_IMAGES` | 最大图片消息数 | `2` |
-| `MULTIMODAL_IMAGE_FRESH_MINUTES` | 图片有效期（分钟） | `30` |
-
-### 工具
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `LLM_ENABLE_TOOLS` | 启用工具调用 | `true` |
-| `LLM_MAX_TOOL_ROUNDS` | 最大工具调用轮数 | `3` |
-| `BOCHA_API_KEY` | 博查搜索 API Key | - |
-| `BOCHA_SEARCH_COUNT` | 搜索结果数量 | `10` |
-| `COMFYUI_BASE_URL` | ComfyUI 服务地址 | `http://127.0.0.1:8188` |
-
-### 记忆
-
-| 配置项 | 说明 | 默认值 |
-|--------|------|--------|
-| `MEMORY_ACTIVE` | 启用记忆功能 | `true` |
-| `MEMORY_MAX_LENGTH` | 最大记忆条数 | `16` |
-
-## rg 指令
-
-```text
-rg              # 刷新并展示人格列表
-rg list         # 同上
-rg set <人格名>  # 切换人格
-rg query <人格名> # 查看人格详情
-rg draw on      # 启用 ComfyUI 画图
-rg draw off     # 禁用 ComfyUI 画图
+```yaml
+CONTEXT_TOKEN_BUDGET: 4096      # 上下文 token 预算
+CONTEXT_WINDOW_SIZE: 16         # 上下文窗口大小
+CONTEXT_SUMMARY_ENABLED: false  # 是否启用摘要压缩
 ```
 
-## 迁移说明
+### 多模态设置
 
-- 旧版扩展系统已移除（`NG_EXT_*`）
-- 不再支持模型输出 `/#tool&args#/` 调用工具
-- 工具统一在 `llm_tool_plugins/` 中，通过原生工具调用执行
-- 人格统一从配置文件同级 `personas/` 子目录加载
+```yaml
+MULTIMODAL_ENABLE: true
+MULTIMODAL_MAX_MESSAGES_WITH_IMAGES: 2
+MULTIMODAL_IMAGE_FRESH_MINUTES: 120
+```
 
-## License
+## 相关项目
 
-MIT
+- [GalgameCharacterSkills](https://github.com/Langzaigg/GalgameCharacterSkills) - 人格生成器
+- [ComfyUI-AnimaTool](https://github.com/Langzaigg/ComfyUI-AnimaTool) - ComfyUI 画图工具
+
+## 许可证
+
+MIT License

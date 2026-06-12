@@ -1,0 +1,116 @@
+# Naturel GPT 配置文件
+# 文档: https://github.com/Langzaigg/nonebot_naturel_gpt_re
+
+# ==================== OpenAI 配置 ====================
+# 多组 OpenAI 配置（推荐方式）
+OPENAI_PROFILES:
+  default:
+    api_keys:
+      - sk-your-api-key-here
+    base_url: https://api.openai.com/v1
+    proxy: ''
+    timeout: 60
+    model: gpt-4o
+    model_mini: gpt-4o-mini
+    temperature: 0.4
+    top_p: 1
+    max_tokens: 1024
+    max_summary_tokens: 512
+    frequency_penalty: 0.4
+    presence_penalty: 0.4
+    multimodal: true
+    extra_prompt: ''
+
+# 当前激活的配置名（为空时使用第一个 profile）
+OPENAI_ACTIVE_PROFILE: default
+
+# ==================== 旧格式兼容 ====================
+# 如果已配置 OPENAI_PROFILES，以下字段可省略
+OPENAI_API_KEYS:
+  - sk-your-api-key-here
+OPENAI_BASE_URL: https://api.openai.com/v1
+OPENAI_PROXY_SERVER: ''
+OPENAI_TIMEOUT: 60
+CHAT_MODEL: gpt-4o
+CHAT_MODEL_MINI: gpt-4o-mini
+CHAT_TEMPERATURE: 0.4
+CHAT_TOP_P: 1
+CHAT_PRESENCE_PENALTY: 0.4
+CHAT_FREQUENCY_PENALTY: 0.4
+CHAT_MAX_SUMMARY_TOKENS: 512
+REPLY_MAX_TOKENS: 1024
+
+# ==================== 流式响应 ====================
+LLM_ENABLE_STREAM: true
+LLM_SHOW_REASONING: false
+
+# ==================== 消息分段 ====================
+NG_ENABLE_MSG_SPLIT: true
+REPLY_SEGMENT_INTERVAL: 1.0
+REPLY_MAX_SEGMENTS: 5
+
+# ==================== 上下文管理 ====================
+CONTEXT_TOKEN_BUDGET: 4096
+CONTEXT_WINDOW_SIZE: 16
+CONTEXT_BUFFER_SIZE: 20
+CONTEXT_SUMMARY_ENABLED: false
+CONTEXT_COMPRESS_THRESHOLD_RATIO: 0.5
+TOOL_CONTEXT_TOKEN_BUDGET: 16384
+TOOL_CONTEXT_MODE: 3
+
+# ==================== 多模态图片 ====================
+MULTIMODAL_ENABLE: true
+MULTIMODAL_HISTORY_LENGTH: 4
+MULTIMODAL_MAX_MESSAGES_WITH_IMAGES: 2
+MULTIMODAL_IMAGE_FRESH_MINUTES: 120
+
+# ==================== 工具调用 ====================
+LLM_ENABLE_TOOLS: true
+LLM_MAX_TOOL_ROUNDS: 3
+LLM_DISABLED_TOOLS: []
+
+# ==================== 搜索工具 ====================
+TAVILY_API_KEY: []
+BOCHA_API_KEY: ''
+BOCHA_API_BASE: https://api.bochaai.com/v1/web-search
+BOCHA_SEARCH_COUNT: 20
+
+# ==================== 网页抓取 ====================
+WEB_FETCH_TIMEOUT: 20
+WEB_FETCH_MAX_CHARS: 6000
+PLAYWRIGHT_TIMEOUT: 20
+
+# ==================== Pixiv 搜索 ====================
+LLM_TOOL_LOLICON_CONFIG:
+  proxy: null
+  r18: 0
+  pic_proxy: null
+  exclude_ai: true
+
+# ==================== Bangumi 搜索 ====================
+BANGUMI_ACCESS_TOKEN: ''
+
+# ==================== ComfyUI 画图 ====================
+COMFYUI_BASE_URL: http://127.0.0.1:8188
+COMFYUI_ENABLED: false
+
+# ==================== NAS 游戏查询 ====================
+NAS_GAME_ROOT_PATH: ''
+NAS_GAME_UPLOAD_PATH: ''
+NAS_GAME_BASE_URL: ''
+NAS_GAME_WHITELIST_GROUPS: []  # 白名单群号，如 ['123456789', '987654321']
+
+# ==================== 其他设置 ====================
+REPLY_THROTTLE_TIME: 3
+IGNORE_PREFIX: '#'
+UNLOCK_CONTENT_LIMIT: false
+GROUP_CARD: true
+NG_CHECK_USER_NAME_HYPHEN: false
+
+# ==================== 人格设置 ====================
+DEFAULT_PERSONA: SOUL
+PRESETS: {}
+
+# ==================== 调试设置 ====================
+VERSION: '1.0'
+DEBUG_LEVEL: 0
