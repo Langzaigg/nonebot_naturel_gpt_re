@@ -203,7 +203,7 @@ class Config(BaseModel, extra=Extra.ignore):
 
 # 配置文件模板(把全部默认值写到Config定义里比较乱，因此保留此默认值对象,作为真实的默认值)
 CONFIG_TEMPLATE = {
-    "OPENAI_API_KEYS": ['sk-xxxxxxxxxxxxx'],  # OpenAI API Key（旧格式兼容，有 OPENAI_PROFILES 时可省略）
+    "OPENAI_API_KEYS": ['sk-your-api-key-here'],  # OpenAI API Key（旧格式兼容，有 OPENAI_PROFILES 时可省略）
     "OPENAI_TIMEOUT": 60,   # OpenAI 请求超时时间（旧格式兼容）
     'OPENAI_PROXY_SERVER': '',  # 请求OpenAI的代理服务器（旧格式兼容）
     'OPENAI_BASE_URL': 'https://api.openai.com/v1',  # 请求OpenAI的基础URL（旧格式兼容）
