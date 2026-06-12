@@ -1,4 +1,4 @@
-﻿from typing import Any, Dict, List
+from typing import Any, Dict, List
 from nonebot.config import Config as NBConfig
 from pydantic import BaseModel, Extra
 from nonebot import get_driver
@@ -23,16 +23,16 @@ class PresetConfig(BaseModel, extra=Extra.ignore):
 
 class Config(BaseModel, extra=Extra.ignore):
     """ng 配置数据，默认保存为 naturel_gpt_config.yml"""
-    OPENAI_API_KEYS: List[str]
-    """OpenAI API Key 列表（旧格式兼容）"""
-    OPENAI_TIMEOUT: int
-    """OpenAI 请求超时时间（旧格式兼容）"""
-    OPENAI_PROXY_SERVER: str
-    """请求OpenAI的代理服务器（旧格式兼容）"""
-    OPENAI_BASE_URL: str
-    """请求OpenAI的基础URL（旧格式兼容）"""
+    OPENAI_API_KEYS: List[str] = []
+    """OpenAI API Key 列表（旧格式兼容，有 OPENAI_PROFILES 时可省略）"""
+    OPENAI_TIMEOUT: int = 60
+    """OpenAI 请求超时时间（旧格式兼容，有 OPENAI_PROFILES 时可省略）"""
+    OPENAI_PROXY_SERVER: str = ''
+    """请求OpenAI的代理服务器（旧格式兼容，有 OPENAI_PROFILES 时可省略）"""
+    OPENAI_BASE_URL: str = 'https://api.openai.com/v1'
+    """请求OpenAI的基础URL（旧格式兼容，有 OPENAI_PROFILES 时可省略）"""
     OPENAI_PROFILES: Dict[str, Dict[str, Any]] = {}
-    """多组 OpenAI 配置，每组包含 api_keys/base_url/proxy/timeout/model 等"""
+    """多组 OpenAI 配置，每组包含 api_keys/base_url/proxy/timeout/model/extra_prompt 等"""
     OPENAI_ACTIVE_PROFILE: str = ""
     """当前激活的配置名；为空时使用第一个 profile"""
     REPLY_THROTTLE_TIME: int
@@ -43,22 +43,22 @@ class Config(BaseModel, extra=Extra.ignore):
     """默认人格名；为空或不存在时使用首个已加载人格"""
     IGNORE_PREFIX: str
     """忽略前缀 以该前缀开头的消息将不会被处理"""
-    CHAT_MODEL: str
-    """OpenAI 模型"""
-    CHAT_MODEL_MINI: str
-    """OpenAI MINI模型"""
-    CHAT_TOP_P: float
-    CHAT_TEMPERATURE: float
+    CHAT_MODEL: str = ''
+    """OpenAI 模型（旧格式兼容，有 OPENAI_PROFILES 时可省略）"""
+    CHAT_MODEL_MINI: str = ''
+    """OpenAI MINI模型（旧格式兼容，有 OPENAI_PROFILES 时可省略）"""
+    CHAT_TOP_P: float = 0.95
+    CHAT_TEMPERATURE: float = 0.6
     """温度越高越随机"""
-    CHAT_PRESENCE_PENALTY: float
+    CHAT_PRESENCE_PENALTY: float = 0.0
     """主题重复惩罚"""
-    CHAT_FREQUENCY_PENALTY: float
+    CHAT_FREQUENCY_PENALTY: float = 0.0
     """复读惩罚"""
 
-    CHAT_MAX_SUMMARY_TOKENS: int
-    """单次总结最大token数"""
-    REPLY_MAX_TOKENS: int
-    """单次回复最大token数"""
+    CHAT_MAX_SUMMARY_TOKENS: int = 800
+    """单次总结最大token数（旧格式兼容，有 OPENAI_PROFILES 时可省略）"""
+    REPLY_MAX_TOKENS: int = 4096
+    """单次回复最大token数（旧格式兼容，有 OPENAI_PROFILES 时可省略）"""
     CONTEXT_TOKEN_BUDGET: int
     """上下文窗口token预算，控制prompt最大token数"""
     CONTEXT_WINDOW_SIZE: int
@@ -78,8 +78,12 @@ class Config(BaseModel, extra=Extra.ignore):
     """是否把模型 reasoning_content 发送到聊天中"""
     LLM_ENABLE_TOOLS: bool
     """是否启用原生工具调用"""
+    LLM_DISABLED_TOOLS: List[str]
+    """禁用的工具列表，填写工具模块名（如 browse_url、pixiv_search）"""
     LLM_MAX_TOOL_ROUNDS: int
     """单轮回复最多工具调用轮数"""
+    LLM_MAX_TOTAL_TOOL_CALLS: int
+    """单轮总工具调用次数上限"""
 
     REPLY_ON_NAME_MENTION_PROBABILITY: float
     """是否在被提及时回复"""
@@ -148,21 +152,30 @@ class Config(BaseModel, extra=Extra.ignore):
     """图片有效期（分钟），超过此时间的图片不再作为上下文"""
 
     CONTEXT_BUFFER_SIZE: int
-    """非触发消息缓冲区大小（消息条数），同时控制图片视野窗口"""
+    """旧版非触发消息缓冲区大小（兼容字段；主路径窗口由 CONTEXT_WINDOW_SIZE 和 CONTEXT_COMPRESS_THRESHOLD_RATIO 计算）"""
 
+    TAVILY_API_KEY: List[str]
+    """Tavily 搜索 API Key 列表，启动时自动选用额度剩余最多的 key"""
     BOCHA_API_KEY: str
     BOCHA_API_BASE: str
     BOCHA_SEARCH_COUNT: int
     WEB_FETCH_TIMEOUT: int
     WEB_FETCH_MAX_CHARS: int
     PLAYWRIGHT_TIMEOUT: int
-    LLM_TOOL_LOLICON_CONFIG: Dict[str, Any]
     BANGUMI_ACCESS_TOKEN: str
+    TOOL_PROXY: str
+    """工具代理地址，如 socks5://127.0.0.1:7789，为空则不使用代理"""
+    PIXIV_R18: int
+    """Pixiv 搜索 R18 设置：0=关闭，1=开启，2=仅R18"""
+    PIXIV_PIC_PROXY: str
+    """Pixiv 图片反代地址，为空则使用原始地址"""
+    PIXIV_EXCLUDE_AI: bool
+    """是否排除 AI 生成的图片"""
 
     COMFYUI_BASE_URL: str
     """ComfyUI Anima 画图服务地址"""
     COMFYUI_ENABLED: bool
-    """ComfyUI Anima 画图是否开启，持久化以便重启时自动恢复"""
+    """ComfyUI Anima 画图是否开启，启动时自动 health check 后设置"""
 
     NAS_GAME_ROOT_PATH: str
     """NAS Galgame 合集根目录路径"""
@@ -190,39 +203,37 @@ class Config(BaseModel, extra=Extra.ignore):
 
 # 配置文件模板(把全部默认值写到Config定义里比较乱，因此保留此默认值对象,作为真实的默认值)
 CONFIG_TEMPLATE = {
-    "OPENAI_API_KEYS": [    # OpenAI API Key 列表（旧格式兼容）
-        'sk-xxxxxxxxxxxxx',
-        'sk-xxxxxxxxxxxxx',
-    ],
+    "OPENAI_API_KEYS": ['sk-xxxxxxxxxxxxx'],  # OpenAI API Key（旧格式兼容，有 OPENAI_PROFILES 时可省略）
     "OPENAI_TIMEOUT": 60,   # OpenAI 请求超时时间（旧格式兼容）
     'OPENAI_PROXY_SERVER': '',  # 请求OpenAI的代理服务器（旧格式兼容）
-    'OPENAI_BASE_URL': 'https://api.openai.com/v1',      # 请求OpenAI的基础URL（旧格式兼容）
+    'OPENAI_BASE_URL': 'https://api.openai.com/v1',  # 请求OpenAI的基础URL（旧格式兼容）
     'OPENAI_PROFILES': {},  # 多组 OpenAI 配置；为空时自动从旧格式扁平键创建 default profile
     'OPENAI_ACTIVE_PROFILE': '',  # 当前激活的配置名；为空时使用第一个 profile
     "REPLY_THROTTLE_TIME": 3,   # 回复间隔节流时间
     "PRESETS": {},
     "DEFAULT_PERSONA": "",
     'IGNORE_PREFIX': '#',   # 忽略前缀 以该前缀开头的消息将不会被处理
-    'CHAT_MODEL': "gpt-4o",
-    'CHAT_MODEL_MINI': "gpt-4o-mini",
-    'CHAT_TOP_P': 1,
-    'CHAT_TEMPERATURE': 0.4,    # 温度越高越随机
-    'CHAT_PRESENCE_PENALTY': 0.4,   # 主题重复惩罚
-    'CHAT_FREQUENCY_PENALTY': 0.4,  # 复读惩罚
-
-    'CHAT_MAX_SUMMARY_TOKENS': 512,   # 单次总结最大token数
-    'REPLY_MAX_TOKENS': 1024,   # 单次回复最大token数
+    'CHAT_MODEL': "gpt-4o",  # 旧格式兼容，有 OPENAI_PROFILES 时可省略
+    'CHAT_MODEL_MINI': "gpt-4o-mini",  # 旧格式兼容
+    'CHAT_TOP_P': 1,  # 旧格式兼容
+    'CHAT_TEMPERATURE': 0.4,  # 旧格式兼容
+    'CHAT_PRESENCE_PENALTY': 0.4,  # 旧格式兼容
+    'CHAT_FREQUENCY_PENALTY': 0.4,  # 旧格式兼容
+    'CHAT_MAX_SUMMARY_TOKENS': 512,  # 旧格式兼容
+    'REPLY_MAX_TOKENS': 1024,  # 旧格式兼容
     'CONTEXT_TOKEN_BUDGET': 4096,  # 上下文窗口token预算
     'CONTEXT_WINDOW_SIZE': 16,  # 上下文窗口大小（对话轮数），每轮=1条用户消息+1条回复
     'CONTEXT_SUMMARY_ENABLED': False,  # 是否启用上下文摘要压缩
     'CONTEXT_COMPRESS_THRESHOLD_RATIO': 0.5,  # 压缩触发阈值乘数，溢出超过窗口*此比例才触发摘要生成
-    'TOOL_CONTEXT_TOKEN_BUDGET': 8196,  # 工具消息token预算（含思考），超出时从旧到新逐组去除
+    'TOOL_CONTEXT_TOKEN_BUDGET': 16384,  # 工具消息token预算（含思考），超出时从旧到新逐组去除
     'TOOL_CONTEXT_MODE': 3,  # 工具上下文模式: 1=完整工具+思考, 2=仅思考, 3=仅工具调用摘要
 
     'LLM_ENABLE_STREAM': True,
     'LLM_SHOW_REASONING': False,
     'LLM_ENABLE_TOOLS': True,
+    'LLM_DISABLED_TOOLS': [],  # 禁用的工具列表，填写工具模块名（如 browse_url、pixiv_search）
     'LLM_MAX_TOOL_ROUNDS': 3,
+    'LLM_MAX_TOTAL_TOOL_CALLS': 15,
 
     'REPLY_ON_NAME_MENTION_PROBABILITY': 0,  # 被提及时回复概率
     'REPLY_ON_AT': True,            # 是否在被at时回复
@@ -263,26 +274,25 @@ CONFIG_TEMPLATE = {
 
     'CONTEXT_BUFFER_SIZE': 10,
 
+    'TAVILY_API_KEY': [],
     'BOCHA_API_KEY': '',
     'BOCHA_API_BASE': 'https://api.bochaai.com/v1/web-search',
-    'BOCHA_SEARCH_COUNT': 5,
+    'BOCHA_SEARCH_COUNT': 20,
     'WEB_FETCH_TIMEOUT': 20,
     'WEB_FETCH_MAX_CHARS': 6000,
     'PLAYWRIGHT_TIMEOUT': 20,
-    'LLM_TOOL_LOLICON_CONFIG': {
-        'proxy': None,
-        'r18': 0,
-        'pic_proxy': None,
-        'exclude_ai': True,
-    },
-    'BANGUMI_ACCESS_TOKEN': 'PYQedhSLwtbHwMdNdpS5U6YdPpGYDZCcmN0UO3xn',
+    'BANGUMI_ACCESS_TOKEN': '',
+    'TOOL_PROXY': '',
+    'PIXIV_R18': 0,
+    'PIXIV_PIC_PROXY': '',
+    'PIXIV_EXCLUDE_AI': True,
 
     'COMFYUI_BASE_URL': 'http://127.0.0.1:8188',
     'COMFYUI_ENABLED': False,
 
-    'NAS_GAME_ROOT_PATH': r'Z:\不错玩\Galgame合集',
-    'NAS_GAME_UPLOAD_PATH': r'Z:\upload\游戏',
-    'NAS_GAME_BASE_URL': 'http://legend503.site:5544/ghs/不错玩/Galgame合集/',
+    'NAS_GAME_ROOT_PATH': '',
+    'NAS_GAME_UPLOAD_PATH': '',
+    'NAS_GAME_BASE_URL': '',
     'NAS_GAME_WHITELIST_GROUPS': ['149378291', '726905061', '620260076'],
 
     'UNLOCK_CONTENT_LIMIT': False,  # 解锁内容限制
@@ -357,11 +367,12 @@ def _load_config_obj_from_file()->Config:
     # 读取配置文件
     with open(config_path, 'r', encoding='utf-8') as f:
         try:
-            config_obj_from_file:Dict = yaml.load(f, Loader=yaml.FullLoader)
+            config_obj_from_file:Dict = yaml.safe_load(f)
             for k in CONFIG_TEMPLATE.keys():
                 if not k in config_obj_from_file.keys():
                     config_obj_from_file[k] = CONFIG_TEMPLATE[k]
-                    logger.info(f"Naturel GPT 配置文件缺少 {k} 项，将使用默认值")
+                    if k not in _LEGACY_FIELDS or not config_obj_from_file.get("OPENAI_PROFILES"):
+                        logger.info(f"Naturel GPT 配置文件缺少 {k} 项，将使用默认值")
 
             # 人格来源固定为 naturel_gpt_config.yml 同级的 personas 子目录。
             # 配置文件中的 PRESETS 不再作为输入来源，保留字段仅用于运行时承载动态人格。
@@ -406,7 +417,27 @@ def _load_config_obj_from_file()->Config:
                         "max_summary_tokens": config_obj_from_file.get("CHAT_MAX_SUMMARY_TOKENS", 800),
                         "frequency_penalty": config_obj_from_file.get("CHAT_FREQUENCY_PENALTY", 0.0),
                         "presence_penalty": config_obj_from_file.get("CHAT_PRESENCE_PENALTY", 0.0),
-                    }
+                        "extra_prompt": "",
+                    },
+                    "kimi": {
+                        "api_keys": config_obj_from_file.get("OPENAI_API_KEYS", []),
+                        "base_url": "https://api.moonshot.cn/v1",
+                        "proxy": "",
+                        "timeout": 120,
+                        "model": "kimi-k2.5",
+                        "model_mini": "kimi-k2.5",
+                        "temperature": 0.4,
+                        "top_p": 0.95,
+                        "max_tokens": 4096,
+                        "max_summary_tokens": 800,
+                        "frequency_penalty": 0.0,
+                        "presence_penalty": 0.0,
+                        "extra_prompt": (
+                            "工具调用要果断，只要用户需求可能涉及搜索、资料查询或图片创作，立刻调用对应工具，不要犹豫或先文字试探。\n"
+                            "不要复述用户的话，不要重复自己已经表达过的观点，每句话只出现一次。\n"
+                            "减少推理和分析过程，直接输出结论和最终回答，不要展示思考步骤。"
+                        ),
+                    },
                 }
                 config_obj_from_file["OPENAI_ACTIVE_PROFILE"] = "default"
         except Exception as e:
@@ -416,18 +447,28 @@ def _load_config_obj_from_file()->Config:
         config_obj = Config.parse_obj(config_obj_from_file)
     return config_obj
 
+# 旧格式兼容字段，有 OPENAI_PROFILES 时不需要写入 YAML
+_LEGACY_FIELDS = {
+    "OPENAI_API_KEYS", "OPENAI_TIMEOUT", "OPENAI_PROXY_SERVER", "OPENAI_BASE_URL",
+    "CHAT_MODEL", "CHAT_MODEL_MINI", "CHAT_TOP_P", "CHAT_TEMPERATURE",
+    "CHAT_PRESENCE_PENALTY", "CHAT_FREQUENCY_PENALTY",
+    "CHAT_MAX_SUMMARY_TOKENS", "REPLY_MAX_TOKENS",
+}
+
+
 def save_config():
     # 检查数据文件夹目录、日志目录是否存在 不存在则创建
-    if not Path(config.NG_DATA_PATH[:-1]).exists():
-        Path(config.NG_DATA_PATH[:-1]).mkdir(parents=True)
-    if not Path(config.NG_LOG_PATH[:-1]).exists():
-        Path(config.NG_LOG_PATH[:-1]).mkdir(parents=True)
+    Path(config.NG_DATA_PATH).parent.mkdir(parents=True, exist_ok=True)
+    Path(config.NG_LOG_PATH).parent.mkdir(parents=True, exist_ok=True)
     get_persona_dir().mkdir(parents=True, exist_ok=True)
 
-    # 保存配置文件
+    # 保存配置文件（有 OPENAI_PROFILES 时剔除旧格式兼容字段）
     with open(config_path, 'w', encoding='utf-8') as f:
         config_dict = config.dict()
         config_dict["PRESETS"] = {}
+        if config_dict.get("OPENAI_PROFILES"):
+            for field in _LEGACY_FIELDS:
+                config_dict.pop(field, None)
         yaml.dump(config_dict, f, allow_unicode=True, sort_keys=False)
 
 def load_config_from_file_then_save():
@@ -444,8 +485,8 @@ def reload_config():
     assert(config)
 
     config_tmp = _load_config_obj_from_file()
-    for k in config.dict():
-        setattr(config, k, getattr(config_tmp,k))
+    # 直接替换整个 config 对象，避免 setattr 逐字段覆盖丢失新字段
+    config = config_tmp
     logger.info(f'Naturel GPT 配置文件重载成功! ver:{config.VERSION}')
 
 # 检查config文件夹是否存在 不存在则创建

@@ -74,21 +74,40 @@ search_subject_schema = {
     "type": "function",
     "function": {
         "name": "bangumi_search_subject",
-        "description": "在 Bangumi 搜索动画、漫画、游戏、音乐、书籍等条目。返回匹配的条目列表（含ID、名称、评分、简介等）。如需更多信息（角色、关联作品等），用返回的 ID 调用 bangumi_get_subject。",
+        "description": "在 Bangumi 搜索动画、漫画、游戏、音乐、书籍等条目。返回匹配的条目列表（含ID、名称、评分、简介等）。如需更多信息（角色、关联作品等），用返回的 ID 调用 bangumi_get_subject。按会社搜索示例：keyword留空，tags设为['Key']可搜索Key社游戏。",
         "parameters": {
             "type": "object",
             "properties": {
                 "keyword": {
                     "type": "string",
-                    "description": "搜索关键词",
+                    "description": "搜索关键词（按会社搜索时可留空）",
                 },
                 "type": {
                     "type": "string",
                     "enum": ["anime", "book", "music", "game", "real"],
                     "description": "条目类型筛选：anime=动画, book=书籍/漫画, music=音乐, game=游戏, real=真人/三次元",
                 },
+                "sort": {
+                    "type": "string",
+                    "enum": ["match", "heat", "rank", "score"],
+                    "description": "排序方式：match=匹配度(默认), heat=收藏人数, rank=排名, score=评分",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "标签列表（且关系），如 ['治愈系','日常'] 或 ['Key'] 搜索Key社游戏",
+                },
+                "air_date": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "播出/发售日期范围（且关系），格式 YYYY-MM-DD，如 ['>=2024-07-01','<2024-10-01'] 表示2024年7月新番",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "返回数量上限，默认10",
+                },
             },
-            "required": ["keyword"],
+            "required": [],
         },
     },
 }
@@ -125,6 +144,10 @@ search_character_schema = {
                     "type": "string",
                     "description": "搜索关键词（角色名）",
                 },
+                "nsfw": {
+                    "type": "boolean",
+                    "description": "是否包含NSFW角色，默认false（不包含）",
+                },
             },
             "required": ["keyword"],
         },
@@ -144,8 +167,26 @@ search_person_schema = {
                     "type": "string",
                     "description": "搜索关键词（人物名）",
                 },
+                "careers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "职业筛选（且关系），如 ['artist','director']",
+                },
             },
             "required": ["keyword"],
+        },
+    },
+}
+
+# 每日放送
+calendar_schema = {
+    "type": "function",
+    "function": {
+        "name": "bangumi_calendar",
+        "description": "获取 Bangumi 每日放送列表，返回本周每天的动画放送信息（含名称、评分、放送日期等）。",
+        "parameters": {
+            "type": "object",
+            "properties": {},
         },
     },
 }
@@ -160,6 +201,7 @@ def _get_run_functions():
         "bangumi_get_subject": _self.run_get_subject,
         "bangumi_search_character": _self.run_search_character,
         "bangumi_search_person": _self.run_search_person,
+        "bangumi_calendar": _self.run_calendar,
     }
 
 
@@ -171,23 +213,35 @@ def get_tools():
         ("bangumi_get_subject", get_subject_schema, runs["bangumi_get_subject"]),
         ("bangumi_search_character", search_character_schema, runs["bangumi_search_character"]),
         ("bangumi_search_person", search_person_schema, runs["bangumi_search_person"]),
+        ("bangumi_calendar", calendar_schema, runs["bangumi_calendar"]),
     ]
 
 
 # ============ API 请求 ============
 
-async def _api_request(method: str, path: str, token: str, json_data: Dict[str, Any] = None) -> Any:
-    """Make an authenticated request to Bangumi API."""
+async def _api_request(method: str, path: str, token: str, json_data: Dict[str, Any] = None, params: Dict[str, Any] = None, proxy: str = None) -> Any:
+    """Make a request to Bangumi API. Falls back to unauthenticated request if token is invalid."""
     headers = {
-        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
-        "User-Agent": "NaturelGPT/1.0",
+        "User-Agent": "nonebot-plugin-naturel-gpt/NaturelGPT (https://github.com/topics/nonebot-plugin)",
     }
-    async with httpx.AsyncClient(timeout=30) as client:
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    
+    async with httpx.AsyncClient(proxy=proxy or None, timeout=30) as client:
         if method.upper() == "POST":
-            resp = await client.post(f"{BANGUMI_API_BASE}{path}", json=json_data, headers=headers)
+            resp = await client.post(f"{BANGUMI_API_BASE}{path}", json=json_data, headers=headers, params=params)
         else:
-            resp = await client.get(f"{BANGUMI_API_BASE}{path}", headers=headers)
+            resp = await client.get(f"{BANGUMI_API_BASE}{path}", headers=headers, params=params)
+        
+        # If 401 and we had a token, retry without token
+        if resp.status_code == 401 and token:
+            headers.pop("Authorization", None)
+            if method.upper() == "POST":
+                resp = await client.post(f"{BANGUMI_API_BASE}{path}", json=json_data, headers=headers, params=params)
+            else:
+                resp = await client.get(f"{BANGUMI_API_BASE}{path}", headers=headers, params=params)
+        
         resp.raise_for_status()
         return resp.json()
 
@@ -519,21 +573,38 @@ async def run_search_subject(args: Dict[str, Any], config) -> Tuple[str, List[Di
     """搜索条目。"""
     keyword = str(args.get("keyword") or "").strip()
     type_filter = str(args.get("type") or "").strip()
-    
-    if not keyword:
-        return "请输入搜索关键词。", []
-    
+    sort = str(args.get("sort") or "").strip()
+    tags = args.get("tags") or []
+    air_date = args.get("air_date") or []
+    limit = args.get("limit")
+
+    if not keyword and not tags:
+        return "请输入搜索关键词或标签。", []
+
     token = getattr(config, "BANGUMI_ACCESS_TOKEN", "")
-    if not token:
-        return "Bangumi API 未配置 Access Token。", []
+    proxy = getattr(config, "TOOL_PROXY", "") or None
     
     try:
         # 构建搜索参数
-        payload = {"keyword": keyword}
+        payload: Dict[str, Any] = {"keyword": keyword}
+        if sort and sort in ("match", "heat", "rank", "score"):
+            payload["sort"] = sort
+
+        filter_obj: Dict[str, Any] = {}
         if type_filter and type_filter in SUBJECT_TYPE_MAP:
-            payload["filter"] = {"type": [SUBJECT_TYPE_MAP[type_filter]]}
-        
-        data = await _api_request("POST", "/v0/search/subjects", token, payload)
+            filter_obj["type"] = [SUBJECT_TYPE_MAP[type_filter]]
+        if tags and isinstance(tags, list):
+            filter_obj["tag"] = [str(t) for t in tags if t]
+        if air_date and isinstance(air_date, list):
+            filter_obj["air_date"] = [str(d) for d in air_date if d]
+        if filter_obj:
+            payload["filter"] = filter_obj
+
+        params = {}
+        if isinstance(limit, int) and limit > 0:
+            params["limit"] = min(limit, 50)
+
+        data = await _api_request("POST", "/v0/search/subjects", token, payload, params=params, proxy=proxy)
         
         subjects = data.get("data", [])
         if not subjects:
@@ -561,12 +632,11 @@ async def run_get_subject(args: Dict[str, Any], config) -> Tuple[str, List[Dict[
         return "请提供条目 ID。", []
     
     token = getattr(config, "BANGUMI_ACCESS_TOKEN", "")
-    if not token:
-        return "Bangumi API 未配置 Access Token。", []
+    proxy = getattr(config, "TOOL_PROXY", "") or None
     
     try:
         # 获取条目基本信息
-        subject = await _api_request("GET", f"/v0/subjects/{subject_id}", token)
+        subject = await _api_request("GET", f"/v0/subjects/{subject_id}", token, proxy=proxy)
         
         # 并行获取关联信息
         persons = []
@@ -574,17 +644,17 @@ async def run_get_subject(args: Dict[str, Any], config) -> Tuple[str, List[Dict[
         relations = []
         
         try:
-            persons = await _api_request("GET", f"/v0/subjects/{subject_id}/persons", token)
+            persons = await _api_request("GET", f"/v0/subjects/{subject_id}/persons", token, proxy=proxy)
         except Exception:
             pass
         
         try:
-            characters = await _api_request("GET", f"/v0/subjects/{subject_id}/characters", token)
+            characters = await _api_request("GET", f"/v0/subjects/{subject_id}/characters", token, proxy=proxy)
         except Exception:
             pass
         
         try:
-            relations = await _api_request("GET", f"/v0/subjects/{subject_id}/subjects", token)
+            relations = await _api_request("GET", f"/v0/subjects/{subject_id}/subjects", token, proxy=proxy)
         except Exception:
             pass
         
@@ -607,21 +677,23 @@ async def run_get_subject(args: Dict[str, Any], config) -> Tuple[str, List[Dict[
 async def run_search_character(args: Dict[str, Any], config) -> Tuple[str, List[Dict[str, Any]]]:
     """搜索角色，直接展开出演作品和声优信息。"""
     keyword = str(args.get("keyword") or "").strip()
+    nsfw = args.get("nsfw")
     if not keyword:
         return "请输入搜索关键词。", []
-    
+
     token = getattr(config, "BANGUMI_ACCESS_TOKEN", "")
-    if not token:
-        return "Bangumi API 未配置 Access Token。", []
-    
+    proxy = getattr(config, "TOOL_PROXY", "") or None
+
     try:
-        payload = {"keyword": keyword}
-        data = await _api_request("POST", "/v0/search/characters", token, payload)
-        
+        payload: Dict[str, Any] = {"keyword": keyword}
+        if nsfw is not None:
+            payload["filter"] = {"nsfw": bool(nsfw)}
+        data = await _api_request("POST", "/v0/search/characters", token, payload, proxy=proxy)
+
         characters = data.get("data", [])
         if not characters:
             return f"在 Bangumi 上没有找到「{keyword}」的相关角色。", []
-        
+
         # 获取每个角色的出演作品和声优信息
         results = []
         for c in characters[:5]:
@@ -630,20 +702,20 @@ async def run_search_character(args: Dict[str, Any], config) -> Tuple[str, List[
             persons = []
             if char_id:
                 try:
-                    subjects = await _api_request("GET", f"/v0/characters/{char_id}/subjects", token)
+                    subjects = await _api_request("GET", f"/v0/characters/{char_id}/subjects", token, proxy=proxy)
                 except Exception:
                     pass
                 try:
-                    persons = await _api_request("GET", f"/v0/characters/{char_id}/persons", token)
+                    persons = await _api_request("GET", f"/v0/characters/{char_id}/persons", token, proxy=proxy)
                 except Exception:
                     pass
             results.append(_format_character_brief(c, subjects, persons))
-        
+
         response = f"找到 {len(characters)} 个角色，显示前 {len(results)} 个：\n\n"
         response += "\n\n".join(results)
-        
+
         return response, []
-        
+
     except httpx.HTTPStatusError as e:
         return f"Bangumi API 请求失败: {e.response.status_code}", []
     except Exception as e:
@@ -653,21 +725,23 @@ async def run_search_character(args: Dict[str, Any], config) -> Tuple[str, List[
 async def run_search_person(args: Dict[str, Any], config) -> Tuple[str, List[Dict[str, Any]]]:
     """搜索人物，直接展开参与作品。"""
     keyword = str(args.get("keyword") or "").strip()
+    careers = args.get("careers") or []
     if not keyword:
         return "请输入搜索关键词。", []
-    
+
     token = getattr(config, "BANGUMI_ACCESS_TOKEN", "")
-    if not token:
-        return "Bangumi API 未配置 Access Token。", []
-    
+    proxy = getattr(config, "TOOL_PROXY", "") or None
+
     try:
-        payload = {"keyword": keyword}
-        data = await _api_request("POST", "/v0/search/persons", token, payload)
-        
+        payload: Dict[str, Any] = {"keyword": keyword}
+        if careers and isinstance(careers, list):
+            payload["filter"] = {"career": [str(c) for c in careers if c]}
+        data = await _api_request("POST", "/v0/search/persons", token, payload, proxy=proxy)
+
         persons = data.get("data", [])
         if not persons:
             return f"在 Bangumi 上没有找到「{keyword}」的相关人物。", []
-        
+
         # 获取每个人物的参与作品
         results = []
         for p in persons[:5]:
@@ -675,17 +749,60 @@ async def run_search_person(args: Dict[str, Any], config) -> Tuple[str, List[Dic
             subjects = []
             if person_id:
                 try:
-                    subjects = await _api_request("GET", f"/v0/persons/{person_id}/subjects", token)
+                    subjects = await _api_request("GET", f"/v0/persons/{person_id}/subjects", token, proxy=proxy)
                 except Exception:
                     pass
             results.append(_format_person_brief(p, subjects))
-        
+
         response = f"找到 {len(persons)} 个人物，显示前 {len(results)} 个：\n\n"
         response += "\n\n".join(results)
-        
+
         return response, []
-        
+
     except httpx.HTTPStatusError as e:
         return f"Bangumi API 请求失败: {e.response.status_code}", []
     except Exception as e:
         return f"搜索出错: {e!r}", []
+
+
+WEEKDAY_CN = {0: "周一", 1: "周二", 2: "周三", 3: "周四", 4: "周五", 5: "周六", 6: "周日"}
+
+
+async def run_calendar(args: Dict[str, Any], config) -> Tuple[str, List[Dict[str, Any]]]:
+    """获取每日放送。"""
+    token = getattr(config, "BANGUMI_ACCESS_TOKEN", "")
+    proxy = getattr(config, "TOOL_PROXY", "") or None
+
+    try:
+        data = await _api_request("GET", "/calendar", token, proxy=proxy)
+
+        lines = ["本周放送："]
+        for day in data:
+            weekday = day.get("weekday", {})
+            day_name = weekday.get("cn") or WEEKDAY_CN.get(weekday.get("id", 0), "")
+            items = day.get("items", [])
+            if not items:
+                continue
+            day_lines = []
+            for s in items[:8]:
+                name = s.get("name", "")
+                name_cn = s.get("name_cn", "")
+                rating = (s.get("rating") or {}).get("score")
+                air_date = s.get("air_date", "")
+                display = name_cn if name_cn else name
+                parts = [display]
+                if rating:
+                    parts.append(f"⭐{rating}")
+                if air_date:
+                    parts.append(air_date)
+                day_lines.append(f"  [{s.get('id')}] {' | '.join(parts)}")
+            if day_lines:
+                lines.append(f"\n{day_name}（{len(items)}部）：")
+                lines.extend(day_lines)
+
+        return "\n".join(lines), []
+
+    except httpx.HTTPStatusError as e:
+        return f"Bangumi API 请求失败: {e.response.status_code}", []
+    except Exception as e:
+        return f"获取放送出错: {e!r}", []

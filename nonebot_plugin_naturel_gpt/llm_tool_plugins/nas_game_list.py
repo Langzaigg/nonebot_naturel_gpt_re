@@ -20,10 +20,11 @@ def _load_config_whitelist(config) -> set:
     return _whitelist
 
 
-def _check_whitelist(config) -> Tuple[bool, str, str]:
-    from ..openai_func import TextGenerator
-    tg = TextGenerator.instance
-    chat_key = getattr(tg, "_current_chat_key", "")
+def _check_whitelist(config, chat_key: str = "") -> Tuple[bool, str, str]:
+    if not chat_key:
+        from ..openai_func import TextGenerator
+        tg = TextGenerator.instance
+        chat_key = getattr(tg, "_current_chat_key", "")
     if not chat_key or not chat_key.startswith("group_"):
         return False, "", "此功能仅限群聊使用"
     group_id = chat_key.split("_", 1)[1]
@@ -33,11 +34,11 @@ def _check_whitelist(config) -> Tuple[bool, str, str]:
     return True, group_id, ""
 
 
-_BRAND_SCAN_MAX_DEPTH = 3
+_BRAND_SCAN_MAX_DEPTH = 5
 
 
 def _build_index(config) -> Dict:
-    root = Path(getattr(config, "NAS_GAME_ROOT_PATH", r"Z:\不错玩\Galgame合集"))
+    root = Path(getattr(config, "NAS_GAME_ROOT_PATH", r"REDACTED_LOCAL_PATH"))
     brands: List[Dict] = []
     if not root.exists():
         logger.warning(f"[NAS Game] 根目录不存在: {root}")
@@ -61,15 +62,6 @@ def _build_index(config) -> Dict:
             logger.warning(f"[NAS Game] 无法访问目录 {dir_path}: {e}")
         return items
 
-    def _has_files(dir_path: Path) -> bool:
-        try:
-            for child in dir_path.iterdir():
-                if child.is_file():
-                    return True
-        except Exception:
-            pass
-        return False
-
     def _scan(dir_path: Path, depth: int):
         if depth > _BRAND_SCAN_MAX_DEPTH:
             return
@@ -88,11 +80,9 @@ def _build_index(config) -> Dict:
                     "games": children,
                 })
 
-        # 只有当目录没有文件时才递归子目录（子目录可能是子会社）
-        # 如果目录有文件，子目录是分类（如steam版），不作为独立会社
-        if not _has_files(dir_path):
-            for sub in subdirs:
-                _scan(sub, depth + 1)
+        # 始终递归子目录，确保深层游戏能被扫描到
+        for sub in subdirs:
+            _scan(sub, depth + 1)
 
     try:
         _scan(root, 0)
@@ -118,7 +108,7 @@ def _load_index(config) -> Dict:
         try:
             with open(index_file, "r", encoding="utf-8") as f:
                 _index_cache = json.load(f)
-            if _index_cache.get("root_missing"):
+            if _index_cache.get("root_missing") or not _index_cache.get("brands"):
                 _index_cache = _build_index(config)
                 _save_index(config)
             logger.info(
@@ -232,8 +222,8 @@ def _archive_games(config) -> Tuple[List[str], List[str], List[str]]:
     扫描上传目录，将符合格式的游戏归档到合集对应会社文件夹。
     返回 (成功列表, 重复列表, 无匹配列表)。
     """
-    upload_dir = Path(getattr(config, "NAS_GAME_UPLOAD_PATH", r"Z:\upload\游戏"))
-    root = Path(getattr(config, "NAS_GAME_ROOT_PATH", r"Z:\不错玩\Galgame合集"))
+    upload_dir = Path(getattr(config, "NAS_GAME_UPLOAD_PATH", r"REDACTED_LOCAL_PATH"))
+    root = Path(getattr(config, "NAS_GAME_ROOT_PATH", r"REDACTED_LOCAL_PATH"))
 
     if not upload_dir.exists():
         return [], [], []
@@ -381,7 +371,9 @@ def _get_download_url(config, index: Dict, brand: str = "", game: str = "", path
     else:
         return "请提供 会社名+游戏名 或直接提供游戏路径"
 
-    base_url = getattr(config, "NAS_GAME_BASE_URL", "http://legend503.site:5544/ghs/不错玩/Galgame合集/")
+    base_url = getattr(config, "NAS_GAME_BASE_URL", "")
+    if not base_url:
+        return "NAS_GAME_BASE_URL 未配置，无法生成下载链接"
     base_url = base_url.rstrip("/")
     rel_path = rel_path.lstrip("/")
 

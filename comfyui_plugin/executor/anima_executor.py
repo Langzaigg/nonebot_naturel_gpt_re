@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urljoin
 
-from .config import AnimaToolConfig
+from .config import AnimaToolConfig, BASE10_UNET_NAME
 from .history import HistoryManager
 
 
@@ -80,19 +80,22 @@ def _join_csv(*parts: str) -> str:
 
 def build_anima_positive_text(prompt_json: Dict[str, Any]) -> str:
     """
-    按 Anima 推荐顺序拼接正面提示词（全部逗号连接，不分行）。
-    顺序：[质量/安全/年份] [人数] [角色] [作品] [画师] [风格] [外观] [标签] [环境] [自然语言]
-    
-    说明：nltags（自然语言补充）放在最后，因为它是"实在没法用 tag 才写"的兜底描述。
+    按 Anima 官方推荐顺序拼接正面提示词。
+
+    README 推荐顺序：
+    [quality/meta/year/safety] [count] [character] [series] [artist] [general tags]
+
+    输出格式：
+    [质量/安全] [人数] [角色] [作品] [外观] [画师] [风格] [标签] [环境] [自然语言]
     """
     return _join_csv(
         prompt_json.get("quality_meta_year_safe", ""),
         prompt_json.get("count", ""),
         prompt_json.get("character", ""),
         prompt_json.get("series", ""),
+        prompt_json.get("appearance", ""),
         prompt_json.get("artist", ""),
         prompt_json.get("style", ""),
-        prompt_json.get("appearance", ""),
         prompt_json.get("tags", ""),
         prompt_json.get("environment", ""),
         prompt_json.get("nltags", ""),
@@ -133,6 +136,11 @@ class AnimaExecutor:
         refine_template_path = Path(__file__).resolve().parent / "workflow_template_refine.json"
         with refine_template_path.open("r", encoding="utf-8") as f:
             self._workflow_template_refine: Dict[str, Any] = json.load(f)
+
+        # base v1.0 工作流模板
+        base10_template_path = Path(__file__).resolve().parent / "workflow_template_base1.0.json"
+        with base10_template_path.open("r", encoding="utf-8") as f:
+            self._workflow_template_base10: Dict[str, Any] = json.load(f)
 
         # 生成历史管理器
         self.history = HistoryManager()
@@ -408,6 +416,74 @@ class AnimaExecutor:
 
         if width is None or height is None:
             # 默认方形 1MP（1024 是 16 的倍数）
+            width, height = 1024, 1024
+
+        wf["28"]["inputs"]["width"] = int(width)
+        wf["28"]["inputs"]["height"] = int(height)
+        wf["28"]["inputs"]["batch_size"] = int(prompt_json.get("batch_size") or 1)
+
+        # 采样参数
+        seed = prompt_json.get("seed")
+        if seed is None:
+            seed = int.from_bytes(uuid.uuid4().bytes[:4], "big", signed=False)
+        wf["19"]["inputs"]["seed"] = int(seed)
+
+        wf["19"]["inputs"]["steps"] = int(prompt_json.get("steps") or wf["19"]["inputs"]["steps"])
+        wf["19"]["inputs"]["cfg"] = float(prompt_json.get("cfg") or wf["19"]["inputs"]["cfg"])
+        wf["19"]["inputs"]["sampler_name"] = str(prompt_json.get("sampler_name") or wf["19"]["inputs"]["sampler_name"])
+        wf["19"]["inputs"]["scheduler"] = str(prompt_json.get("scheduler") or wf["19"]["inputs"]["scheduler"])
+        wf["19"]["inputs"]["denoise"] = float(prompt_json.get("denoise") or wf["19"]["inputs"]["denoise"])
+
+        # 文件名前缀
+        wf["52"]["inputs"]["filename_prefix"] = str(prompt_json.get("filename_prefix") or wf["52"]["inputs"]["filename_prefix"])
+
+        return wf
+
+    def _inject_base10(self, prompt_json: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Base v1.0 模式：使用 anima-base-v1.0 模型的工作流注入。
+        """
+        wf = deepcopy(self._workflow_template_base10)
+
+        # 模型文件：使用 base v1.0 的 unet，clip 和 vae 保持不变
+        clip_name = prompt_json.get("clip_name") or self.config.clip_name
+        unet_name = prompt_json.get("unet_name") or BASE10_UNET_NAME
+        vae_name = prompt_json.get("vae_name") or self.config.vae_name
+        
+        wf["45"]["inputs"]["clip_name"] = str(clip_name)
+        wf["44"]["inputs"]["unet_name"] = str(unet_name)
+        wf["15"]["inputs"]["vae_name"] = str(vae_name)
+
+        # 可选：LoRA 注入（仅 UNET）
+        self._inject_loras(wf, prompt_json.get("loras"))
+
+        # 文本：优先使用直接指定的 positive，否则从结构化字段构建
+        positive = (prompt_json.get("positive") or "").strip()
+        if not positive:
+            positive = build_anima_positive_text(prompt_json)
+        wf["11"]["inputs"]["text"] = positive
+
+        negative = (prompt_json.get("neg") or prompt_json.get("negative") or "").strip()
+        wf["12"]["inputs"]["text"] = negative
+
+        # 分辨率
+        width = prompt_json.get("width")
+        height = prompt_json.get("height")
+        aspect_ratio = (prompt_json.get("aspect_ratio") or "").strip()
+        round_to = int(prompt_json.get("round_to") or self.config.round_to)
+
+        if (width is None or height is None) and aspect_ratio:
+            w, h = estimate_size_from_ratio(
+                aspect_ratio=aspect_ratio,
+                target_megapixels=float(prompt_json.get("target_megapixels") or self.config.target_megapixels),
+                round_to=round_to,
+            )
+            width, height = w, h
+        elif width is not None and height is not None:
+            width = align_dimension(width, round_to)
+            height = align_dimension(height, round_to)
+
+        if width is None or height is None:
             width, height = 1024, 1024
 
         wf["28"]["inputs"]["width"] = int(width)
@@ -726,25 +802,19 @@ class AnimaExecutor:
         """
         输入结构化 JSON，执行生成。
 
+        参数：
+        - prompt_json: 提示词和参数
+        - use_base10: 可在 prompt_json 中传入 "use_base10": true 使用 base v1.0 模型
+
         返回：
         - prompt_id
         - positive / negative（最终发送给 ComfyUI 的文本）
         - width / height
         - images: [{filename, url, file_path, base64, mime_type, markdown}]
         """
-        # 预检查：模型文件
-        models_ok, models_msg = self.check_models()
-        if not models_ok:
-            raise RuntimeError(models_msg)
-
-        mode = (prompt_json.get("mode") or "fast").strip().lower()
-        refine_from = prompt_json.get("refine_from")
-        if refine_from:
-            prompt = self._inject_refine(prompt_json)
-        elif mode == "fine":
-            prompt = self._inject_fine(prompt_json)
-        else:
-            prompt = self._inject(prompt_json)
+        # 始终使用 base v1.0 工作流（preview 模型已弃用）
+        mode = "base1.0"
+        prompt = self._inject_base10(prompt_json)
 
         prompt_id = self.queue_prompt(prompt)
         history_item = self.wait_history(prompt_id)
@@ -778,19 +848,15 @@ class AnimaExecutor:
             images_data.append(img_info)
 
         # 回显最终参数（便于调试）
-        # 注意：fine 模式的 seed 在节点 53（rgthree Seed），fast 模式在节点 19 内联
-        if mode == "fine":
-            actual_seed = int(prompt["53"]["inputs"]["seed"])
-            actual_positive = prompt["81"]["inputs"]["text_b"]
-        else:
-            actual_seed = int(prompt["19"]["inputs"]["seed"])
-            actual_positive = prompt["11"]["inputs"]["text"]
+        actual_seed = int(prompt["19"]["inputs"]["seed"])
+        actual_positive = prompt["11"]["inputs"]["text"]
         actual_negative = prompt["12"]["inputs"]["text"]
         actual_width = int(prompt["28"]["inputs"]["width"])
         actual_height = int(prompt["28"]["inputs"]["height"])
 
         result = {
             "success": True,
+            "mode": mode,
             "prompt_id": prompt_id,
             "positive": actual_positive,
             "negative": actual_negative,

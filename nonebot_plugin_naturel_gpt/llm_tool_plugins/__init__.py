@@ -17,10 +17,15 @@ _EXCLUDED_MODULES = {"__init__", "common", "anima_generate"}
 def _discover_tools(config) -> None:
     """自动发现并注册 llm_tool_plugins 目录下的工具。"""
     plugin_dir = Path(__file__).parent
+    registered: List[str] = []
+    disabled_tools = set(getattr(config, "LLM_DISABLED_TOOLS", []) or [])
 
     for py_file in sorted(plugin_dir.glob("*.py")):
         module_name = py_file.stem
         if module_name in _EXCLUDED_MODULES:
+            continue
+        if module_name in disabled_tools:
+            logger.info(f"[工具发现] 跳过禁用的工具模块: {module_name}")
             continue
 
         try:
@@ -32,7 +37,6 @@ def _discover_tools(config) -> None:
         # 检查 should_load(config) - 可选的条件加载钩子
         should_load = getattr(module, "should_load", None)
         if should_load and not should_load(config):
-            logger.info(f"[工具发现] {module_name} 条件不满足，跳过加载")
             continue
 
         # 方式1: 模块导出 TOOLS 列表 [(name, schema, run), ...]
@@ -42,8 +46,7 @@ def _discover_tools(config) -> None:
                 if len(tool_def) == 3:
                     name, schema, run_func = tool_def
                     TOOL_REGISTRY[name] = (schema, run_func)
-                    logger.info(f"[工具发现] 已注册: {name} (来自 {module_name})")
-            # 调用 init(config) 如果存在
+                    registered.append(name)
             init_func = getattr(module, "init", None)
             if init_func:
                 try:
@@ -57,9 +60,7 @@ def _discover_tools(config) -> None:
         run_func = getattr(module, "run", None)
         if schema and run_func and inspect.isfunction(run_func):
             TOOL_REGISTRY[module_name] = (schema, run_func)
-            logger.info(f"[工具发现] 已注册: {module_name}")
-
-            # 调用 init(config) 如果存在
+            registered.append(module_name)
             init_func = getattr(module, "init", None)
             if init_func:
                 try:
@@ -75,10 +76,12 @@ def _discover_tools(config) -> None:
                 tools = get_tools()
                 for name, tool_schema, tool_run in tools:
                     TOOL_REGISTRY[name] = (tool_schema, tool_run)
-                    logger.info(f"[工具发现] 已注册: {name} (来自 {module_name})")
+                    registered.append(name)
             except Exception as e:
                 logger.warning(f"[工具发现] {module_name} get_tools() 失败: {e}")
             continue
+
+    logger.info(f"[工具发现] 已注册 {len(registered)} 个工具: {', '.join(registered)}")
 
 
 def init_tools(config) -> None:

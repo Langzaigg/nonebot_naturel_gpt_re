@@ -38,10 +38,13 @@ def _get_env_int(key: str, default: int) -> int:
     return default
 
 
-# 默认模型文件名
+# 默认模型文件名（preview 版本）
 DEFAULT_UNET_NAME = "anima-preview.safetensors"
 DEFAULT_CLIP_NAME = "qwen_3_06b_base.safetensors"
 DEFAULT_VAE_NAME = "qwen_image_vae.safetensors"
+
+# base v1.0 模型文件名
+BASE10_UNET_NAME = "anima-base-v1.0.safetensors"
 
 
 @dataclass
