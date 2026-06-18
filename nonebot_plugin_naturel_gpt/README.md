@@ -6,16 +6,13 @@
 
 流式响应 · 多模态图片 · 原生工具调用 · 动态人格 · 智能上下文
 
+[核心亮点](#-核心亮点) · [快速开始](#-快速开始) · [详细说明](#-详细说明) · [数据与迁移](#-数据与迁移)
+
 </div>
 
 ---
 
-## 🗺️ 快速导航
-
-- [✨ 核心亮点](#-核心亮点)
-- [🚀 快速开始](#-快速开始)
-- [📖 详细说明](#-详细说明)
-- [🗃️ 数据与迁移](#-数据与迁移)
+> 本目录是 [Naturel GPT Re](../README.md) 仓库的 NoneBot2 群聊插件，也可单独复制到任意 NoneBot 项目的 `plugins/` 目录下使用。
 
 ---
 
@@ -87,7 +84,6 @@ CHAT_MAX_SUMMARY_TOKENS: 800
 - `CHAT_MODEL`：正常聊天模型。
 - `CHAT_MODEL_MINI`：摘要和印象总结模型。
 - `OPENAI_BASE_URL`：支持任意 OpenAI-compatible API。
-- 更多配置项见下文“基础配置”。
 
 3. 把人格文件放到 `config/personas/`。
 
@@ -99,26 +95,26 @@ CHAT_MAX_SUMMARY_TOKENS: 800
 
 ### 📂 目录结构
 
-插件代码：
+**插件代码**：
 
 ```text
 ATRI/plugins/nonebot_plugin_naturel_gpt/
 ```
 
-运行配置：
+**运行配置**：
 
 ```text
 config/naturel_gpt_config.yml
 config/personas/
 ```
 
-运行数据：
+**运行数据**：
 
 ```text
 data/naturel_gpt/
 ```
 
-工具目录：
+**工具目录**：
 
 ```text
 ATRI/plugins/nonebot_plugin_naturel_gpt/llm_tool_plugins/
@@ -126,9 +122,9 @@ ATRI/plugins/nonebot_plugin_naturel_gpt/llm_tool_plugins/
 
 每个工具单独封装在一个 Python 文件中，由 `llm_tools.py` 统一注册和调度。启动时可通过 `LLM_DISABLED_TOOLS` 列表跳过指定工具。
 
-### ⚙️ 基础配置
+---
 
-大模型基础配置示例：
+### ⚙️ 基础配置
 
 ```yaml
 OPENAI_API_KEYS:
@@ -148,6 +144,8 @@ CHAT_MAX_SUMMARY_TOKENS: 800
 - `CHAT_MODEL`：用于正常聊天。
 - `CHAT_MODEL_MINI`：用于摘要和用户印象总结。
 - `OPENAI_BASE_URL`：支持任意 OpenAI-compatible API。
+
+---
 
 ### 🔀 多 OpenAI 配置（可选）
 
@@ -176,6 +174,8 @@ OPENAI_PROFILES:
 - `extra_prompt`：模型专用追加提示词，会注入到 System 2 末尾，用于特定模型调优。
 - 旧版扁平键（如 `OPENAI_API_KEYS`、`CHAT_MODEL`）会自动迁移为 `default` profile。
 
+---
+
 ### ⚡ 流式响应
 
 ```yaml
@@ -186,6 +186,8 @@ LLM_SHOW_REASONING: false
 - `LLM_ENABLE_STREAM`：控制是否边生成边处理回复。
 - `LLM_SHOW_REASONING`：控制是否把模型返回的 `reasoning_content` 发送到聊天中。
 - 群聊环境通常建议保持 `LLM_SHOW_REASONING: false`。
+
+---
 
 ### ✂️ 分段发送
 
@@ -209,6 +211,8 @@ REPLY_MAX_SEGMENTS: 5
 - 会过滤常见 Markdown 语法，包括代码块、标题、列表标记、粗体、链接等。
 - 系统提示词要求模型像真实群聊一样说话，不写文章，不频繁分段，不使用 Markdown。
 
+---
+
 ### 🖼️ 多模态图片输入
 
 ```yaml
@@ -227,6 +231,8 @@ MULTIMODAL_MAX_MESSAGES_WITH_IMAGES: 2
 
 - 模型本身必须支持视觉输入。
 - 图片 URL 必须能被模型服务访问；插件会自动把 QQ 等私有 URL 下载缓存为 `data:image/...` base64 格式。
+
+---
 
 ### 🛠️ 工具调用
 
@@ -315,6 +321,8 @@ BANGUMI_ACCESS_TOKEN: ''
 
 如果 `BANGUMI_ACCESS_TOKEN` 为空，工具不会加载。
 
+---
+
 ### 🎭 人格加载
 
 人格不再从配置文件 `PRESETS` 手写加载。`PRESETS` 在配置文件中会保持为空，仅作为运行时动态人格承载字段。
@@ -392,6 +400,8 @@ resource/speech_patterns.md
 
 `SKILL.md` 会过滤顶部 YAML front matter 和通用激活模板，例如 `Roleplay Rules`、语言规则、退出角色扮演、默认激活、激活方式等。其它文件按固定顺序完整注入系统提示词。
 
+---
+
 ### 🎮 rg 指令
 
 人格会在以下场景动态刷新：
@@ -413,6 +423,8 @@ rg reload_config
 ```
 
 `rg` 和 `rg list` 会展示当前可用人格列表。新增或修改人格文件后，通常不需要重启 Bot，直接执行 `rg` 或 `rg set <人格名>` 即可触发动态加载。
+
+---
 
 ### 🧠 上下文管理设计
 
@@ -506,3 +518,9 @@ data/naturel_gpt/logs/
 - 不再支持模型输出 `/#tool&args#/` 调用工具。
 - 工具统一迁移到 `llm_tool_plugins/`，并通过原生工具调用执行。
 - 人格统一从 `naturel_gpt_config.yml` 同级的 `personas` 子目录加载，可混放 `.md` 文件和 skill 文件夹。
+
+---
+
+<p align="center">
+  <a href="../README.md">← 返回项目根目录</a>
+</p>
