@@ -16,6 +16,15 @@ def get_tool_schemas(config, chat_key: str = "") -> List[Dict[str, Any]]:
             allowed, _, _ = _check_whitelist(config, chat_key)
             if not allowed:
                 continue
+        # 画图工具：根据 turbo_mode 或 manga_mode 选择 schema
+        if name == "generate_anima_image" and chat_key:
+            from .llm_tool_plugins import anima_generate
+            is_manga = anima_generate.get_manga_mode(chat_key)
+            is_turbo = anima_generate.get_turbo_mode(chat_key)
+            # 漫画模式或 turbo 模式都使用 turbo schema
+            if (is_manga or is_turbo) and anima_generate.get_schema(turbo=True):
+                schemas.append(anima_generate.get_schema(turbo=True))
+                continue
         schemas.append(schema)
     return schemas
 

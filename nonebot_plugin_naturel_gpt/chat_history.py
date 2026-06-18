@@ -104,6 +104,29 @@ class ChatHistoryMixin:
                         break
                 preset.prompt_messages.insert(insert_at, history_item)
             else:
+                # 触发 user 消息：若上下文中尚无该用户的个人印象 system，则在其前注入一条。
+                # 一个角色的印象在整个上下文中只注入一次（绑定到首次触发的轮次）；
+                # 裁剪/摘要删除该轮次后，下次该用户触发时自然注入更新后的印象，
+                # 既避免同一用户印象重复注入，又保证历史前缀稳定以命中 prompt 缓存。
+                if role == "user" and user_id:
+                    _uid = str(user_id)
+                    _has_imp = any(
+                        isinstance(m, ChatMessageData) and m.is_impression and m.impression_user_id == _uid
+                        for m in preset.prompt_messages
+                    )
+                    if not _has_imp:
+                        _imp_data = preset.chat_impressions.get(_uid)
+                        if _imp_data and _imp_data.chat_impression.strip():
+                            preset.prompt_messages.append(ChatMessageData(
+                                role="system",
+                                user_id=_uid,
+                                sender="",
+                                text=_imp_data.chat_impression.strip(),
+                                context_only=False,
+                                timestamp=time.time(),
+                                is_impression=True,
+                                impression_user_id=_uid,
+                            ))
                 preset.prompt_messages.append(history_item)
         
         if record_time:
@@ -272,20 +295,32 @@ class ChatHistoryMixin:
 
     @staticmethod
     def _cleanup_orphan_history_messages(messages: List[ChatMessageData]) -> List[ChatMessageData]:
-        """清理没有真实 user 轮次承接的 assistant/tool 历史，保留 context_only。"""
+        """清理没有真实 user 轮次承接的 assistant/tool 历史，保留 context_only。
+        印象 system 绑定到紧随其后的 user 轮：若该 user 被清理则印象一并丢弃，避免孤立印象残留。"""
         cleaned = ChatHistoryMixin._cleanup_orphan_tool_messages(messages)
         result: List[ChatMessageData] = []
         round_open = False
         active_tool_call_ids = set()
+        pending_impression: Optional[ChatMessageData] = None
         for item in cleaned:
             if item.context_only:
                 result.append(item)
                 continue
+            if item.is_impression:
+                # 印象 system 暂存，等下一个 user 决定去留
+                pending_impression = item
+                continue
             if item.role == "user":
                 round_open = True
                 active_tool_call_ids = set()
+                if pending_impression is not None:
+                    result.append(pending_impression)
+                    pending_impression = None
                 result.append(item)
                 continue
+            # assistant / tool：前面挂着未消化的印象说明印象后没跟 user，丢弃该孤立印象
+            if pending_impression is not None:
+                pending_impression = None
             if item.role == "assistant":
                 if not round_open:
                     continue

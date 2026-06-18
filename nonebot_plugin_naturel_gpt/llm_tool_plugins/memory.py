@@ -67,12 +67,8 @@ def _get_memories(chat, preset, scope: str, trigger_userid: str = None) -> Dict[
     if scope == "user":
         if not trigger_userid:
             return {}
-        if chat.chat_data.global_memory_enabled:
-            from ..persistent_data_manager import PersistentDataManager
-            return PersistentDataManager.instance.get_global_user_memories(trigger_userid)
-        if trigger_userid not in preset.user_memories:
-            preset.user_memories[trigger_userid] = {}
-        return preset.user_memories[trigger_userid]
+        from ..persistent_data_manager import PersistentDataManager
+        return PersistentDataManager.instance.get_global_user_memories(trigger_userid)
     if chat.chat_data.global_memory_enabled:
         return chat.chat_data.global_chat_memory
     return preset.chat_memory
@@ -82,11 +78,8 @@ def _set_memories(chat, preset, scope: str, memories: Dict[str, str], trigger_us
     if scope == "user":
         if not trigger_userid:
             return
-        if chat.chat_data.global_memory_enabled:
-            from ..persistent_data_manager import PersistentDataManager
-            PersistentDataManager.instance.set_global_user_memories(trigger_userid, memories)
-        else:
-            preset.user_memories[trigger_userid] = memories
+        from ..persistent_data_manager import PersistentDataManager
+        PersistentDataManager.instance.set_global_user_memories(trigger_userid, memories)
     else:
         if chat.chat_data.global_memory_enabled:
             chat.chat_data.global_chat_memory.clear()

@@ -365,11 +365,8 @@ def _(option_dict, param_dict, chat:Chat, chat_presets_dict:dict, user_id:str=''
     else:
         parts.append(f"[群记忆] (0/{config.MEMORY_MAX_LENGTH}) 无")
 
-    # 当前用户记忆
-    if is_global:
-        user_mem = pdm.get_global_user_memories(user_id) if user_id else {}
-    else:
-        user_mem = preset.user_memories.get(user_id, {}) if user_id else {}
+    # 当前用户记忆（固定全群全人格共享）
+    user_mem = pdm.get_global_user_memories(user_id) if user_id else {}
     if user_mem:
         lines = [f"  {i+1}. {k}: {v}" for i, (k, v) in enumerate(user_mem.items())]
         parts.append(f"[你的记忆] ({len(user_mem)}/{config.MEMORY_MAX_LENGTH})\n" + "\n".join(lines))
@@ -404,20 +401,15 @@ def _(option_dict, param_dict, chat:Chat, chat_presets_dict:dict, user_id:str=''
     elif scope == 'user':
         if not user_id:
             return {'msg': "无法获取当前用户信息 (；′⌒`)"}
-        if is_global:
-            pdm.set_global_user_memories(user_id, {})
-            return {'msg': f"已清除 {preset.preset_key} 的用户记忆 (global) (￣▽￣)-ok!", 'is_progress': True}
-        if user_id in preset.user_memories:
-            del preset.user_memories[user_id]
-            return {'msg': f"已清除 {preset.preset_key} 的用户记忆 (￣▽￣)-ok!", 'is_progress': True}
-        return {'msg': f"{preset.preset_key} 没有关于你的记忆 (；′⌒`)"}
+        pdm.set_global_user_memories(user_id, {})
+        return {'msg': f"已清除你的用户记忆 (global) (￣▽￣)-ok!", 'is_progress': True}
     elif scope == 'all':
         if is_global:
             chat.chat_data.global_chat_memory.clear()
-            pdm.set_global_user_memories(user_id, {}) if user_id else None
         else:
             preset.chat_memory.clear()
-            preset.user_memories.clear()
+        if user_id:
+            pdm.set_global_user_memories(user_id, {})
         return {'msg': f"已清除 {preset.preset_key} 的全部记忆 (￣▽￣)-ok!", 'is_progress': True}
     else:
         return {'msg': "用法: rg mem clear <group|user|all>\n  group=群记忆  user=你的记忆  all=全部"}
@@ -593,6 +585,94 @@ def _(option_dict, param_dict, chat:Chat, chat_presets_dict:dict, user_id:str=''
     return {'msg': f"Anima 画图已设为 {mode} 模式（{mode_desc[mode]}）(￣▽￣)-ok!"}
 
 
+@cmd.register(route='rg/turbo', params=['mode'])
+def _(option_dict, param_dict, chat:Chat, chat_presets_dict:dict, user_id:str=''):
+    mode = param_dict.get('mode', '').strip().lower()
+
+    # 无参数：显示当前状态
+    if not mode:
+        current = anima_generate.get_turbo_mode(chat.chat_key)
+        status = "开启" if current else "关闭"
+        return {'msg': f"当前 Turbo 模式: {status}\n用法: rg turbo <on|off>\nTurbo 模式使用加速工作流（8步），速度约 4-5 倍，默认开启。"}
+
+    if mode not in ('on', 'off'):
+        return {'msg': f"无效参数: {mode}\n用法: rg turbo <on|off>"}
+
+    enabled = (mode == 'on')
+    anima_generate.set_turbo_mode(chat.chat_key, enabled)
+
+    # 如果要开启 turbo，需要确保画图工具已加载
+    if enabled:
+        current_draw_mode = anima_generate.get_chat_mode(chat.chat_key)
+        if current_draw_mode == 'off':
+            return {'msg': "画图功能当前已关闭，请先使用 rg draw <on|auto> 开启画图，再设置 turbo 模式。"}
+        # 确保 turbo schema 已加载
+        if not anima_generate.get_schema(turbo=True):
+            ok, err = anima_generate.fetch_schema_and_knowledge_sync()
+            if not ok:
+                return {'msg': f"加载 turbo 规范失败: {err}"}
+
+    status = "开启" if enabled else "关闭"
+    mode_desc = "Turbo 加速工作流（8步，约15秒）" if enabled else "普通工作流（35步，约60秒）"
+    return {'msg': f"Turbo 模式已{status} ({mode_desc}) (￣▽￣)-ok!"}
+
+
+@cmd.register(route='rg/manga', params=['mode'])
+def _(option_dict, param_dict, chat:Chat, chat_presets_dict:dict, user_id:str=''):
+    mode = param_dict.get('mode', '').strip()
+
+    # 无参数：显示当前状态
+    if not mode:
+        current = anima_generate.get_manga_mode(chat.chat_key)
+        style = anima_generate.get_manga_style(chat.chat_key)
+        status = "开启" if current else "关闭"
+        style_info = f"\n当前画风: {style}" if style else ""
+        return {'msg': f"当前漫画模式: {status}{style_info}\n用法:\n  rg manga on/off  开启/关闭漫画模式\n  rg manga <画风描述>  开启漫画模式并设置自定义画风\n  rg manga clr  清除自定义画风\n漫画模式下 bot 会主动画图来增强角色扮演沉浸感，无视 turbo 选项，固定使用 turbo 工作流。"}
+
+    # 清除画风
+    if mode.lower() == 'clr':
+        anima_generate.set_manga_style(chat.chat_key, "")
+        return {'msg': "漫画画风已清除 (￣▽￣)-ok!"}
+
+    # 关闭
+    if mode.lower() == 'off':
+        anima_generate.set_manga_mode(chat.chat_key, False)
+        return {'msg': "漫画模式已关闭 (￣▽￣)-ok!"}
+
+    # 开启（无自定义画风）
+    if mode.lower() == 'on':
+        # 确保画图工具可用
+        ok, err = anima_generate.health_check_sync()
+        if not ok:
+            return {'msg': f"Anima 画图服务离线，无法开启漫画模式: {err}"}
+        ok, err = anima_generate.fetch_schema_and_knowledge_sync()
+        if not ok:
+            return {'msg': f"加载 Anima 规范失败: {err}"}
+        if enable_anima_tool():
+            logger.info(f"[会话: {chat.chat_key}] Anima 画图工具已注册")
+        anima_generate.set_manga_mode(chat.chat_key, True)
+        if not config.COMFYUI_ENABLED:
+            config.COMFYUI_ENABLED = True
+            save_config()
+        return {'msg': "漫画模式已开启！bot 会在对话中主动画图增强沉浸感 (￣▽￣)-ok!"}
+
+    # 自定义画风描述
+    ok, err = anima_generate.health_check_sync()
+    if not ok:
+        return {'msg': f"Anima 画图服务离线，无法开启漫画模式: {err}"}
+    ok, err = anima_generate.fetch_schema_and_knowledge_sync()
+    if not ok:
+        return {'msg': f"加载 Anima 规范失败: {err}"}
+    if enable_anima_tool():
+        logger.info(f"[会话: {chat.chat_key}] Anima 画图工具已注册")
+    anima_generate.set_manga_mode(chat.chat_key, True)
+    anima_generate.set_manga_style(chat.chat_key, mode)
+    if not config.COMFYUI_ENABLED:
+        config.COMFYUI_ENABLED = True
+        save_config()
+    return {'msg': f"漫画模式已开启，画风设定: {mode} (￣▽￣)-ok!"}
+
+
 def _create_draw_task_from_json(json_str: str, chat: Chat) -> dict:
     """从 JSON 字符串创建绘图任务"""
     # 解析 JSON
@@ -624,10 +704,23 @@ def _create_draw_task_from_json(json_str: str, chat: Chat) -> dict:
 
     # 构建绘图参数（填充默认值）
     draw_args = dict(prompt_data)
+    is_turbo = anima_generate.get_turbo_mode(chat.chat_key)
+
+    # turbo 模式字段映射：tags ↔ nltags（保存兼容性）
+    if is_turbo:
+        if draw_args.get('tags') and not draw_args.get('nltags'):
+            draw_args['nltags'] = draw_args['tags']
+            draw_args['tags'] = ''
+        if draw_args.get('nltags'):
+            draw_args['tags'] = draw_args['nltags']
+        # turbo 模式补充默认负词
+        if not draw_args.get('neg'):
+            draw_args['neg'] = 'worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, bad anatomy, bad hands, bad feet, extra fingers, missing fingers, extra toes, text, watermark, logo'
+
     if not draw_args.get('steps'):
-        draw_args['steps'] = '35'
+        draw_args['steps'] = '8' if is_turbo else '35'
     if not draw_args.get('cfg'):
-        draw_args['cfg'] = '5'
+        draw_args['cfg'] = '1' if is_turbo else '5'
 
     # 检查画图服务是否可用
     ok, err = anima_generate.health_check_sync()
@@ -658,7 +751,10 @@ def _create_draw_task_from_json(json_str: str, chat: Chat) -> dict:
         est_seconds = est_seconds + queue_length * 90 - 30
         est_minutes = max(1, round(est_seconds / 60))
     else:
-        est_seconds = int(60 + (int(draw_args.get('steps', 35)) - 35) * 1.5)
+        if is_turbo:
+            est_seconds = 15
+        else:
+            est_seconds = int(60 + (int(draw_args.get('steps', 35)) - 35) * 1.5)
         est_minutes = max(1, round(est_seconds / 60))
 
     # 提交后台生成任务
@@ -681,7 +777,7 @@ def _create_draw_task_from_json(json_str: str, chat: Chat) -> dict:
             "group_id": group_id,
             "user_id": user_id_val,
         }
-        loop.create_task(anima_generate._do_generate(draw_args, config, send_ctx=send_ctx, task_id=task_id))
+        loop.create_task(anima_generate._do_generate(draw_args, config, send_ctx=send_ctx, task_id=task_id, is_turbo=is_turbo))
     except Exception as e:
         logger.error(f"提交绘图任务失败: {e}")
         return {'msg': f"提交绘图任务失败: {e}"}
@@ -780,6 +876,8 @@ def _(option_dict, param_dict, chat:Chat, chat_presets_dict:dict, user_id:str=''
   rg draw <mode>       切换画图模式 (force/on/auto/off)
   rg draw <json>       根据JSON创建绘图任务
   rg draw-XXXXXX       查询绘图提示词
+  rg turbo <on|off>    切换Turbo加速模式
+  rg manga [on|off|画风] 漫画模式（主动画图增强沉浸感）
 
 【其他】
   rg model [配置名]    查看/切换LLM配置
