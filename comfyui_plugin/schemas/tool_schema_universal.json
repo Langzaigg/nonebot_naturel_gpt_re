@@ -1,15 +1,9 @@
 {
   "name": "generate_anima_image",
-  "description": "使用 Anima（circlestone-labs/Anima）在本地 ComfyUI 生成二次元/插画向图片。调用方应先按 Anima 规范生成结构化字段（顺序：[质量/元数据/年份/安全] [人数] [角色] [作品] [画师] [风格] [外观] [标签] [环境] [自然语言]；自然语言(nltags)建议放最后），并保证安全标签明确（safe/sensitive/nsfw/explicit）。支持并行调用：生成多张图时可同时发起多个请求，无需串行等待。",
+  "description": "使用 Anima（circlestone-labs/Anima）在本地 ComfyUI 生成二次元/插画向图片。调用方应先按 Anima 规范生成结构化字段（顺序：[质量/元数据/年份/安全] [人数] [角色] [作品] [画师] [风格] [外观] [标签] [环境] [自然语言]；自然语言(nltags)建议放最后），并保证安全标签明确（safe/sensitive/nsfw/explicit）。多角色时：所有角色外观统一写在 appearance 中（逗号分隔），角色名统一写在 character 中，角色与外观的对应关系在自然语言(nltags)中明确描述。支持并行调用：生成多张图时可同时发起多个请求，无需串行等待。",
   "parameters": {
     "type": "object",
     "properties": {
-      "mode": {
-        "type": "string",
-        "description": "生成模式。'fast'：快速单阶段生成（默认）；'fine'：精细两阶段生成（Anima 出图 → 1.5x 放大 → animeArtflow_v12 细化），质量更高但速度较慢。",
-        "enum": ["fast", "fine"],
-        "default": "fast"
-      },
       "prompt_hint": {
         "type": "string",
         "description": "可选：人类可读的简短需求摘要，仅用于日志/回显；不会直接拼进提示词。"
@@ -69,14 +63,14 @@
       },
       "steps": {
         "type": "integer",
-        "description": "步数，推荐 30-50。",
+        "description": "采样步数，推荐 30-50，影响画面精细度。画面复杂时（多人物、精细背景、复杂构图）应取较高值。",
         "default": 35,
         "minimum": 20,
         "maximum": 60
       },
       "cfg": {
         "type": "number",
-        "description": "CFG，推荐 4-5。",
+        "description": "CFG 引导强度，推荐 4-5，影响提示词遵循度。画面复杂时（多人物、细节丰富）应取较高值。",
         "default": 4,
         "minimum": 3,
         "maximum": 8
@@ -123,7 +117,7 @@
       },
       "appearance": {
         "type": "string",
-        "description": "角色固定外观：发型发色、眼睛、身材等（不包含服装/饰品）。",
+        "description": "角色外观标签：发型发色、眼睛、服装、饰品等。多角色时所有角色外观写在一起，用逗号分隔。",
         "default": ""
       },
       "artist": {
@@ -142,7 +136,7 @@
       },
       "nltags": {
         "type": "string",
-        "description": "自然语言补充（可选，最多一句话，实在没法用 tag 才写）。",
+        "description": "自然语言描述。多角色时在此写明每个角色的外观和服装归属。纯自然语言提示至少写 2 句话，过短可能产生意外结果。",
         "default": ""
       },
       "environment": {

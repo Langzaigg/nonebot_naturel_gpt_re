@@ -2,10 +2,13 @@
 ComfyUI-AnimaTool：随 ComfyUI 启动的 Anima Tool Use API
 
 路由：
-  POST /anima/generate   - 执行生成（接收结构化 JSON）
-  GET  /anima/schema     - 返回 Tool Schema
-  GET  /anima/knowledge  - 返回专家知识
-  GET  /anima/health     - 健康检查
+  POST /anima/generate         - 执行生成（接收结构化 JSON）
+  GET  /anima/schema           - 返回 Tool Schema
+  GET  /anima/knowledge        - 返回专家知识
+  GET  /anima/health           - 健康检查
+  POST /anima/generate_turbo   - Turbo 快速生成（cfg=1, steps=10, 内置 turbo LoRA）
+  GET  /anima/schema_turbo     - 返回 Turbo Tool Schema
+  GET  /anima/knowledge_turbo  - 返回 Turbo 专家知识
 """
 from __future__ import annotations
 
@@ -50,6 +53,7 @@ def _setup_routes():
 
     knowledge_dir = _TOOL_ROOT / "knowledge"
     schema_path = _TOOL_ROOT / "schemas" / "tool_schema_universal.json"
+    schema_turbo_path = _TOOL_ROOT / "schemas" / "tool_schema_turbo.json"
 
     # -------------------------
     # GET /anima/health
@@ -107,7 +111,50 @@ def _setup_routes():
 
         return web.json_response(result)
 
-    print("[ComfyUI-AnimaTool] Routes registered: /anima/health, /anima/schema, /anima/knowledge, /anima/generate")
+    # -------------------------
+    # GET /anima/schema_turbo
+    # -------------------------
+    @routes.get("/anima/schema_turbo")
+    async def anima_schema_turbo(request):
+        if not schema_turbo_path.exists():
+            return web.json_response({"error": "turbo schema not found"}, status=404)
+        obj = json.loads(schema_turbo_path.read_text(encoding="utf-8"))
+        return web.json_response(obj)
+
+    # -------------------------
+    # GET /anima/knowledge_turbo
+    # -------------------------
+    @routes.get("/anima/knowledge_turbo")
+    async def anima_knowledge_turbo(request):
+        return web.json_response({
+            "turbo_expert": _read_text(knowledge_dir / "turbo_expert.md"),
+            "artist_list": _read_text(knowledge_dir / "artist_list.md"),
+            "turbo_examples": _read_text(knowledge_dir / "turbo_examples.md"),
+        })
+
+    # -------------------------
+    # POST /anima/generate_turbo
+    # -------------------------
+    @routes.post("/anima/generate_turbo")
+    async def anima_generate_turbo(request):
+        try:
+            body = await request.json()
+        except Exception as e:
+            return web.json_response({"error": f"JSON parse error: {e}"}, status=400)
+
+        if "payload" in body and isinstance(body["payload"], dict):
+            payload = body["payload"]
+        else:
+            payload = body
+
+        try:
+            result = await asyncio.to_thread(executor.generate_turbo, payload)
+        except Exception as e:
+            return web.json_response({"error": str(e)}, status=500)
+
+        return web.json_response(result)
+
+    print("[ComfyUI-AnimaTool] Routes registered: /anima/health, /anima/schema, /anima/knowledge, /anima/generate, /anima/schema_turbo, /anima/knowledge_turbo, /anima/generate_turbo")
 
 
 # ComfyUI 加载 custom_nodes 时会 import 这个模块

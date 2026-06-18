@@ -1,0 +1,95 @@
+{
+  "name": "generate_anima_turbo",
+  "description": "使用 Anima Turbo（anima-base-v1.0 + anima-turbo-lora）快速生成二次元/插画图片。cfg=1, steps=10，速度极快。通用标签(tags)直接使用英文自然语言描述即可。",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "lora_strength": {
+        "type": "number",
+        "description": "Turbo LoRA 强度。默认 1.0。降低可减少 LoRA 风格影响。",
+        "default": 1.0,
+        "minimum": 0,
+        "maximum": 2.0
+      },
+      "quality_meta_year_safe": {
+        "type": "string",
+        "description": "质量/元数据/年份/安全标签。必须明确 safe/sensitive/nsfw/explicit 之一。示例：'masterpiece, best quality, highres, newest, year 2025, safe'",
+        "default": "masterpiece, best quality, highres, newest, year 2025, safe"
+      },
+      "count": {
+        "type": "string",
+        "description": "人数标签，如 '1girl' / '2girls' / '1boy' / '1other'。",
+        "default": "1girl"
+      },
+      "character": {
+        "type": "string",
+        "description": "角色名（可含括号作品信息），如 'hatsune miku' 或 'yunli (honkai star rail)'。",
+        "default": ""
+      },
+      "series": {
+        "type": "string",
+        "description": "作品/系列名，如 'vocaloid' / 'honkai star rail'。",
+        "default": ""
+      },
+      "artist": {
+        "type": "string",
+        "description": "画师标签，必须以 @ 开头。如 '@makihitsuji'。无明确需求时留空。",
+        "default": ""
+      },
+      "tags": {
+        "type": "string",
+        "description": "通用标签，直接使用英文自然语言描述场景、动作、服装、表情等。例如：'a girl with long silver hair wearing a white dress, standing in a flower field, smiling, looking at viewer'"
+      },
+      "neg": {
+        "type": "string",
+        "description": "负面提示词。",
+        "default": "worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, bad anatomy, bad hands, bad feet, extra fingers, missing fingers, extra toes, text, watermark, logo"
+      },
+      "aspect_ratio": {
+        "type": "string",
+        "description": "图片比例。默认 1:1。",
+        "enum": [
+          "3:2", "1:1", "2:3"
+        ],
+        "default": "1:1"
+      },
+      "width": {
+        "type": "integer",
+        "description": "宽度（像素），必须是 16 的倍数。若提供 width/height 则优先使用。",
+        "minimum": 64
+      },
+      "height": {
+        "type": "integer",
+        "description": "高度（像素），必须是 16 的倍数。若提供 width/height 则优先使用。",
+        "minimum": 64
+      },
+      "batch_size": {
+        "type": "integer",
+        "description": "批量生成数量。",
+        "default": 1,
+        "minimum": 1
+      },
+      "seed": {
+        "type": "integer",
+        "description": "随机种子。缺省则随机。",
+        "minimum": 0
+      },
+      "positive": {
+        "type": "string",
+        "description": "可选：直接提供最终正面提示词（覆盖结构化拼接）。通常不需要。",
+        "default": ""
+      },
+      "filename_prefix": {
+        "type": "string",
+        "description": "输出文件名前缀。",
+        "default": "AnimaTool_turbo_"
+      }
+    },
+    "required": [
+      "quality_meta_year_safe",
+      "count",
+      "tags"
+    ],
+    "additionalProperties": false
+  }
+}

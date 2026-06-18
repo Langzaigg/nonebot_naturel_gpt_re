@@ -78,6 +78,21 @@ def _join_csv(*parts: str) -> str:
     return ", ".join(cleaned)
 
 
+def build_turbo_positive_text(prompt_json: Dict[str, Any]) -> str:
+    """
+    Turbo 模式拼接正面提示词。
+    顺序：[安全标签] [人数] [角色] [作品] [画师] [通用标签(自然语言)]
+    """
+    return _join_csv(
+        prompt_json.get("quality_meta_year_safe", ""),
+        prompt_json.get("count", ""),
+        prompt_json.get("character", ""),
+        prompt_json.get("series", ""),
+        prompt_json.get("artist", ""),
+        prompt_json.get("tags", ""),
+    )
+
+
 def build_anima_positive_text(prompt_json: Dict[str, Any]) -> str:
     """
     按 Anima 官方推荐顺序拼接正面提示词。
@@ -141,6 +156,11 @@ class AnimaExecutor:
         base10_template_path = Path(__file__).resolve().parent / "workflow_template_base1.0.json"
         with base10_template_path.open("r", encoding="utf-8") as f:
             self._workflow_template_base10: Dict[str, Any] = json.load(f)
+
+        # turbo 工作流模板
+        turbo_template_path = Path(__file__).resolve().parent / "workflow_template_turbo.json"
+        with turbo_template_path.open("r", encoding="utf-8") as f:
+            self._workflow_template_turbo: Dict[str, Any] = json.load(f)
 
         # 生成历史管理器
         self.history = HistoryManager()
@@ -370,6 +390,82 @@ class AnimaExecutor:
     # -------------------------
     # Core workflow injection
     # -------------------------
+    def _inject_turbo(self, prompt_json: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Turbo 模式：使用 anima-turbo-lora 的快速生成工作流注入。
+        cfg 固定 1，steps 固定 10，内置 turbo LoRA。
+        """
+        wf = deepcopy(self._workflow_template_turbo)
+
+        # 模型文件：turbo 默认使用 base-v1.0（LoRA 基础模型）
+        clip_name = prompt_json.get("clip_name") or self.config.clip_name
+        unet_name = prompt_json.get("unet_name") or BASE10_UNET_NAME
+        vae_name = prompt_json.get("vae_name") or self.config.vae_name
+
+        wf["45"]["inputs"]["clip_name"] = str(clip_name)
+        wf["44"]["inputs"]["unet_name"] = str(unet_name)
+        wf["15"]["inputs"]["vae_name"] = str(vae_name)
+
+        # LoRA 强度
+        lora_strength = float(prompt_json.get("lora_strength", 1.0))
+        wf["60"]["inputs"]["strength_model"] = lora_strength
+
+        # 文本
+        positive = (prompt_json.get("positive") or "").strip()
+        if not positive:
+            positive = build_turbo_positive_text(prompt_json)
+        negative = (prompt_json.get("neg") or prompt_json.get("negative") or "").strip()
+
+        wf["11"]["inputs"]["text"] = positive
+        wf["12"]["inputs"]["text"] = negative
+
+        # 分辨率
+        width = prompt_json.get("width")
+        height = prompt_json.get("height")
+        aspect_ratio = (prompt_json.get("aspect_ratio") or "").strip()
+        round_to = int(prompt_json.get("round_to") or self.config.round_to)
+
+        if (width is None or height is None) and aspect_ratio:
+            w, h = estimate_size_from_ratio(
+                aspect_ratio=aspect_ratio,
+                target_megapixels=float(prompt_json.get("target_megapixels") or self.config.target_megapixels),
+                round_to=round_to,
+            )
+            width, height = w, h
+        elif width is not None and height is not None:
+            width = align_dimension(width, round_to)
+            height = align_dimension(height, round_to)
+
+        if width is None or height is None:
+            width, height = 1024, 1024
+
+        wf["28"]["inputs"]["width"] = int(width)
+        wf["28"]["inputs"]["height"] = int(height)
+        wf["28"]["inputs"]["batch_size"] = int(prompt_json.get("batch_size") or 1)
+
+        # 种子
+        seed = prompt_json.get("seed")
+        if seed is None:
+            seed = int.from_bytes(uuid.uuid4().bytes[:4], "big", signed=False)
+        wf["19"]["inputs"]["seed"] = int(seed)
+
+        # turbo 固定参数（不允许覆盖）
+        wf["19"]["inputs"]["steps"] = 10
+        wf["19"]["inputs"]["cfg"] = 1.0
+
+        # 可覆盖的采样参数
+        if prompt_json.get("sampler_name"):
+            wf["19"]["inputs"]["sampler_name"] = str(prompt_json["sampler_name"])
+        if prompt_json.get("scheduler"):
+            wf["19"]["inputs"]["scheduler"] = str(prompt_json["scheduler"])
+        if prompt_json.get("denoise") is not None:
+            wf["19"]["inputs"]["denoise"] = float(prompt_json["denoise"])
+
+        # 文件名前缀
+        wf["52"]["inputs"]["filename_prefix"] = str(prompt_json.get("filename_prefix") or wf["52"]["inputs"]["filename_prefix"])
+
+        return wf
+
     def _inject(self, prompt_json: Dict[str, Any]) -> Dict[str, Any]:
         wf = deepcopy(self._workflow_template)
 
@@ -867,6 +963,79 @@ class AnimaExecutor:
         }
 
         # 记录到历史
+        record = self.history.add(
+            params=prompt_json,
+            positive_text=actual_positive,
+            negative_text=actual_negative,
+            prompt_id=prompt_id,
+            seed=actual_seed,
+            width=actual_width,
+            height=actual_height,
+        )
+        result["history_id"] = record.id
+
+        return result
+
+    def generate_turbo(self, prompt_json: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Turbo 快速生成：使用 anima-turbo-lora，cfg=1, steps=10。
+
+        简化字段：
+        - lora_strength: LoRA 强度（默认 1.0）
+        - quality_meta_year_safe: 安全/质量标签
+        - count: 人数（1girl/1boy 等）
+        - character: 角色名
+        - series: 作品系列
+        - artist: 画师（@ 开头）
+        - tags: 通用标签（英文自然语言）
+        - aspect_ratio / width / height: 分辨率
+        - seed: 随机种子
+        """
+        prompt = self._inject_turbo(prompt_json)
+
+        prompt_id = self.queue_prompt(prompt)
+        history_item = self.wait_history(prompt_id)
+        images = self._extract_images(prompt_id, history_item)
+        images = self._download_images(images)
+
+        images_data = []
+        for im in images:
+            mime_type = self._get_mime_type(im.filename)
+            b64 = base64.b64encode(im.content).decode("ascii") if im.content else None
+
+            img_info = {
+                "filename": im.filename,
+                "subfolder": im.subfolder,
+                "type": im.folder_type,
+                "url": im.view_url,
+                "view_url": im.view_url,
+                "file_path": im.saved_path,
+                "saved_path": im.saved_path,
+                "base64": b64,
+                "mime_type": mime_type,
+                "data_url": f"data:{mime_type};base64,{b64}" if b64 else None,
+                "markdown": f"![{im.filename}]({im.view_url})",
+            }
+            images_data.append(img_info)
+
+        actual_seed = int(prompt["19"]["inputs"]["seed"])
+        actual_positive = prompt["11"]["inputs"]["text"]
+        actual_negative = prompt["12"]["inputs"]["text"]
+        actual_width = int(prompt["28"]["inputs"]["width"])
+        actual_height = int(prompt["28"]["inputs"]["height"])
+
+        result = {
+            "success": True,
+            "mode": "turbo",
+            "prompt_id": prompt_id,
+            "positive": actual_positive,
+            "negative": actual_negative,
+            "seed": actual_seed,
+            "width": actual_width,
+            "height": actual_height,
+            "images": images_data,
+        }
+
         record = self.history.add(
             params=prompt_json,
             positive_text=actual_positive,
